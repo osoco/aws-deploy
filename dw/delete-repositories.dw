@@ -1,0 +1,60 @@
+#!/bin/bash dry-wit
+# mod: delete-repositories.dw
+# api: public
+# txt: Deletes the ECR repositories of a certain Contestia stack.
+
+DW.import aws-ecr;
+DW.import aws-cli;
+
+source $(dirname ${BASH_SOURCE[0]})/contestia.dw;
+
+# fun: deleteRepositories
+# api: public
+# txt: Deletes the ECR repositories of a certain Contestia stack.
+# txt: Returns 0/TRUE always, but can exit if some problem occurs.
+# use: deleteRepositories;
+function deleteRepositories() {
+
+  local _awsRegion;
+  if retrieveAwsRegionForProfile "${PROFILE}"; then
+    _awsRegion="${RESULT}";
+  else
+    exitWithErrorCode CANNOT_RETRIEVE_AWS_REGION;
+  fi
+
+  getRepositoryNames "${ENVIRONMENT}";
+  local _repositoryNames="${RESULT}";
+  local _oldIFS="${IFS}";
+  local _repository;
+  IFS="${DWIFS}";
+  for _repository in ${_repositoryNames}; do
+    IFS="${_oldIFS}";
+    logInfo -n "Checking if ${_repository} actually exists";
+    if ecrRepositoryAlreadyExists "${_repository}" "${PROFILE}"; then
+      logInfoResult SUCCESS "exists";
+      logInfo -n "Deleting ${_repository}";
+      if deleteEcrRepository "${_repository}" "${PROFILE}" "${_awsRegion}"; then
+        logInfoResult SUCCESS "done";
+      else
+        logInfoResult FAILURE "failed";
+        local _error="${ERROR}";
+        if isNotEmpty "${_error}"; then
+          logDebug "${_error}";
+        fi
+      fi
+    else
+      logInfoResult NEUTRAL "missing";
+    fi
+  done;
+  IFS="${_oldIFS}";
+}
+
+# Script metadata
+addCommandLineParameter environment "The environment of the Contestia stack" MANDATORY SINGLE;
+addCommandLineParameter profile "The AWS profile" MANDATORY SINGLE;
+
+DW.getScriptFolder;
+# env: STACK_NAME_SUFFIX: The suffix of the stack. Defaults to -contestia-$(cat index)-[stackName]
+defineEnvVar STACK_NAME_SUFFIX MANDATORY "The suffix the stack" "-contestia-$(cat index)-$(basename ${RESULT})";
+
+# vim: syntax=sh ts=2 sw=2 sts=4 sr noet

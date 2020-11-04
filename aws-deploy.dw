@@ -1,0 +1,1620 @@
+# Copyright 2017-today Osoco S.L.
+# Distributed under the terms of the GNU General Public License v3
+# mod: deploy-aws.dw
+# api: public
+# txt: Functions useful for deploying CloudFormation stacks in AWS.
+
+DW.import aws-cli;
+DW.import aws-cloudformation;
+
+# fun: createOrUpdateStack stack action environment client
+# api: public
+# txt: Creates or updates a stack.
+# opt: stack: The stack.
+# opt: action: The action.
+# opt: environment: The environment.
+# opt: client: The client (optional).
+# txt: Returns 0/${TRUE} if the stack gets created successfully; 1/${FALSE} otherwise.
+# use: if createOrUpdateStack "network" "create" "pre" "myClient"; then
+# use:   echo "Stack network, in environment 'pre', for client' myClient', has been created successfully.";
+# use: fi
+function createOrUpdateStack() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _action="${2}";
+  checkNotEmpty action "${_action}" 2;
+  local _environment="${3}";
+  checkNotEmpty environment "${_environment}" 3;
+  local _client="${4}";
+
+  getLogCategory;
+  local _logCategory="${RESULT}";
+  setLogCategory "deploy-stack";
+
+  if ! readSettings "${_stack}" "${_environment}" "${_client}"; then
+    exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
+  fi
+
+  if ! retrieveIndexes "${_stack}"; then
+    exitWithErrorCode MISSING_STACK_INDEX "${_stack}";
+  fi
+  local _stackIndexes="${RESULT}";
+  buildStackName "${_stack}" "${_environment}" "${_stackIndexes}" "${_client}";
+  export STACK_NAME="${RESULT}";
+
+  if isStackEnabled "${_stack}"; then
+
+    if ! checkStackStatus "${_stack}" "${STACK_NAME}" "${_environment}" "${_client}"; then
+      exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${STACK_NAME}";
+    fi
+
+    local _status="${RESULT}";
+    if isStackDeployed "${_status}"; then
+      logDebug -n "${_stack}";
+      logDebugResult SUCCESS "deployed";
+    else
+      retrieveAwsProfile "${_stack}" "${_environment}" "${_client}";
+      local _awsProfile="${RESULT}";
+
+      if ! retrieveTemplateFile "${_stack}"; then
+        exitWithErrorCode MISSING_TEMPLATE_FILE "${_stack}/${_stack}.json";
+      fi
+      local _templateFile="${RESULT}";
+
+      if ! isCloudformationTemplateValid "${_templateFile}" "${_awsProfile}" "${_stack}"; then
+        exitWithErrorCode INVALID_CLOUDFORMATION_TEMPLATE "${_templateFile}";
+      fi
+
+      if ! runPrehook "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode PREHOOK_FAILED "${_stack}";
+      fi
+
+      displayPreMessage "${_stack}";
+
+      if ! checkPreconditions "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode PRECONDITIONS_NOT_MET "${_stack}";
+      fi
+
+      if ! deployStack "${_awsProfile}" "${STACK_NAME}" "${_stack}" "${_templateFile}" "${_action}" "${_environment}" "${_client}"; then
+        exitWithErrorCode ERROR_DEPLOYING_STACK "${_stack}";
+      fi
+      displayPostMessage "${_stack}";
+
+      if ! runPosthook "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode POSTHOOK_FAILED "${_stack}";
+      fi
+
+      if ! checkPostconditions "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode POSTCONDITIONS_NOT_MET "${_stack}";
+      fi
+    fi
+  else
+    logDebug -n "${_stack}";
+    logDebugResult NEUTRAL "skipped";
+  fi
+
+  setLogCategory "${_logCategory}";
+}
+
+# fun: displayPreMessage stack
+# api: public
+# txt: Displays a message if the stack includes a pre-deployment message file.
+# opt: stack: The stack.
+# txt: Returns 0/${TRUE} if the message exists and is printed; 1/FALSE otherwise.
+# use: displayPreMessage base/network;
+function displayPreMessage() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  if fileExists "${_stack}/pre-message.txt"; then
+    sed "s|^|[${_stack}] |g" "${_stack}/pre-message.txt";
+  fi
+}
+
+# fun: checkPreconditions profile environment stack client?
+# api: public
+# txt: Checks if the preconditions of the stack are met.
+# opt: profile: The profile.
+# opt: environment: The environment.
+# opt: stack: The stack.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the preconditions are met; 1/FALSE otherwise.
+# use: if checkPreconditions dev-myclient dev base/network myclient; then
+# use:   echo "Preconditions met";
+# use: fi
+function checkPreconditions() {
+  local _profile="${1}";
+  checkNotEmpty profile "${_profile}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  local -i _rescode=${TRUE};
+
+  if fileExists "${_stack}/check-preconditions.sh"; then
+    DW.getDryWitPath;
+    "${RESULT}" ${_stack}/check-preconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: runPrehook profile environment stack client?
+# api: public
+# txt: Runs any pre-deployment hooks for given stack.
+# opt: profile: The profile.
+# opt: environment: The environment.
+# opt: stack: The stack.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the hooks, if any, finish successfully; 1/FALSE otherwise.
+# use: if runPrehook dev-myclient dev base/network myclient; then
+# use:   echo "Pre hooks finished successfully";
+# use: fi
+function runPrehook() {
+  local _profile="${1}";
+  checkNotEmpty profile "${_profile}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  if fileExists "${_stack}/pre-hook.sh"; then
+    DW.getDryWitPath;
+    "${RESULT}" ${_stack}/pre-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: displayPostMessage stack
+# api: public
+# txt: Displays a message if the stack includes a post-deployment message file.
+# opt: stack: The stack.
+# txt: Returns 0/${TRUE} always.
+# use: displayPostMessage base/network;
+function displayPostMessage() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  if fileExists "${_stack}/post-message.txt"; then
+    sed "s|^|[${_stack}] |g" "${_stack}/post-message.txt";
+  fi
+}
+
+# fun: checkPostconditions profile environment stack client?
+# api: public
+# txt: Checks if the postconditions of the stack are met.
+# opt: profile: The profile.
+# opt: environment: The environment.
+# opt: stack: The stack.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the postconditions are met; 1/FALSE otherwise.
+# use: if checkPostconditions dev-myclient dev base/network myclient; then
+# use:   echo "Postconditions met";
+# use: fi
+function checkPostconditions() {
+  local _profile="${1}";
+  checkNotEmpty profile "${_profile}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  if fileExists "${_stack}/check-postconditions.sh"; then
+    DW.getDryWitPath;
+    "${RESULT}" ${_stack}/check-postconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: runPosthook profile environment stack client?
+# api: public
+# txt: Runs any post-deployment hooks for given stack.
+# opt: profile: The profile.
+# opt: environment: The environment.
+# opt: stack: The stack.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the hooks, if any, finish successfully; 1/FALSE otherwise.
+# use: if runPosthook dev-myclient dev base/network myclient; then
+# use:   echo "Post hooks finished successfully";
+# use: fi
+function runPosthook() {
+  local _profile="${1}";
+  checkNotEmpty profile "${_profile}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  if fileExists "${_stack}/post-hook.sh"; then
+    DW.getDryWitPath;
+    "${RESULT}" ${_stack}/post-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: isStackEnabled stack
+# api: public
+# txt: Checks whether given stack is enabled or not.
+# opt: stack: The stack.
+# txt: Returns 0/TRUE if the stack is enabled; 1/FALSE otherwise.
+# use: if isStackEnabled core; then
+# use:   echo "core is enabled";
+# use: fi
+function isStackEnabled() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  local -i _rescode=${FALSE};
+
+  local _folder="$(basename ${_stack})";
+  if fileExists "${_stack}/${_folder}.json"; then
+    _rescode=${TRUE};
+
+    local _item;
+    local _oldIFS="${IFS}";
+    IFS="${DWIFS}";
+    for _item in $(echo "${OMIT_STACKS}" | sed "s/,/ /g"); do
+      IFS="${_oldIFS}";
+      if areEqual "${_item}" "${_stack}"; then
+        _rescode=${FALSE};
+        break;
+      fi
+    done
+    IFS="${_oldIFS}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveDependentStacks stack
+# api: public
+# txt: Retrieves the dependent stacks.
+# opt: stack: The stack name.
+# txt: Returns 0/${TRUE} if the dependency analysis succeed; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the stacks the stack depends on (space-separated values).
+# use: if retrieveDependentStacks "dbnetwork"; then
+# use:   echo "dbnetwork dependencies: ${RESULT}";
+# use: fi
+function retrieveDependentStacks() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _result="";
+  local -i _rescode=${FALSE};
+  local _otherStack;
+
+  if fileExists "${_stack}/requirements.yaml"; then
+    for _otherStack in $(find . -type d | grep -v -e '^\.$' | sed 's ^\./  g' | grep -v -e "^${_stack}$"); do
+      grep -e "- ${_otherStack}\W*$" "${_stack}/requirements.yaml" > /dev/null;
+      local -i _aux=$?;
+      if isTrue ${_aux}; then
+        _rescode=${TRUE};
+        logTrace -n "New dependency found for stack: '${_stack}': ${_otherStack}";
+        logTraceResult SUCCESS "${_otherStack}";
+        if isNotEmpty "${_result}"; then
+          _result="${_result} ";
+        fi
+        _result="${_result}${_otherStack}";
+      fi
+    done
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: deployStack awsProfile stackName stack template action environment client
+# api: public
+# txt: Requests the deployment of given stack.
+# opt: awsProfile: The AWS profile.
+# opt: stackName: The stack name.
+# opt: stack: The stack name.
+# opt: template: The template file.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the stack gets deployed successfully; 1/${FALSE} otherwise.
+# use: if deployStack "my-profile" "pre-1-my-stack" "my-stack" "stack.json" "pre" "myClient"; then
+# use:   echo "pre-1-my-stack deployed successfully in pre";
+# use: fi
+function deployStack() {
+  local _awsProfile="${1}";
+  checkNotEmpty awsProfile "${_awsProfile}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _template="${4}";
+  checkNotEmpty template "${_template}" 4;
+  local _action="${5}";
+  checkNotEmpty action "${_action}" 5;
+  local _environment="${6}";
+  checkNotEmpty environment "${_environment}" 6;
+  local _client="${7}";
+
+  local _clientTag="";
+  if isNotEmpty "${_client}"; then
+    _clientTag=" Key=contestia:client,Value=${_client}";
+  fi
+
+  local _timestamp="$(date '+%Y%m%d%H%M%S')";
+  local -i _rescode=${FALSE};
+  local _awsProfile;
+  local _parameters;
+
+  local _region;
+  if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+    _region="${RESULT}";
+  else
+    _region="eu-west-1";
+  fi
+
+  if parametersToKeyValuePairs "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
+    _parameters="${RESULT}";
+    logTrace "$(which aws) --profile ${_awsProfile} --region ${_region} cloudformation create-stack";
+    logTrace "--stack-name \"${_stackName}\"";
+    logTrace "--tags Key=contestia:name,Value=${_stackName} Key=contestia:stack,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}";
+    logTrace "--template-body file://${_template}";
+    logTrace "--parameters ${_parameters}";
+    logTrace "--capabilities CAPABILITY_NAMED_IAM;";
+
+    local _output;
+    _output="$($(which aws) --profile "${_awsProfile}" --region ${_region} \
+                 cloudformation ${_action}-stack \
+                 --stack-name "${_stackName}" \
+                 --tags Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag} \
+                 --template-body file://${_template} \
+                 --parameters ${_parameters} \
+                 --capabilities CAPABILITY_NAMED_IAM)";
+    _rescode=$?;
+  fi
+
+  if isTrue ${_rescode}; then
+    logTrace "${_output}";
+    waitUntilStackFinishes "${_stack}" "${_stackName}" "${_environment}" "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: isStackCreated stack environment client
+# api: public
+# txt: Checks whether given stack is created already.
+# opt: stack: The stack name.
+# opt: environment: The environment.
+# opt: client: The client.
+# txt: Returns 0/${TRUE} if the stack is created correctly; 1/${FALSE} otherwise.
+# use: if isStackCreated "network" "pre" "myclient"; then
+# use:   echo "Stack network in 'pre', for 'myclient', is created";
+# use: fi
+function isStackCreated() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _client="${3}";
+  local -i _rescode=${FALSE};
+
+  local _stackIndexes;
+
+  if retrieveIndexes "${_stack}"; then
+    _stackIndexes="${RESULT}";
+  else
+    exitWithErrorCode MISSING_INDEX_FOR_STACK "${_stack}";
+  fi
+
+  buildStackName "${_stack}" "${_environment}" "${_stackIndexes}" "${_client}";
+  local _stackName="${RESULT}";
+
+  if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
+    local _status="${RESULT}";
+    if isStackDeployed "${_status}"; then
+      _rescode=${TRUE};
+    else
+      _rescode=${FALSE};
+    fi
+  else
+    _rescode=${FALSE};
+  fi
+
+  return ${_rescode};
+}
+
+# fun: isStackDeployed status
+# api: public
+# txt: Checks whether the stack is already deployed
+# opt: status: The stack status.
+# txt: Returns 0/TRUE if the stack is deployed; 1/FALSE otherwise.
+# use: if isStackDeployed ${status}; then
+# use:   echo "Stack deployed";
+# use: fi
+function isStackDeployed() {
+  local _status="${1}";
+  checkNotEmpty status "${_status}" 1;
+
+  local -i _rescode;
+
+  if    areEqual "${_status}" CREATE_COMPLETE \
+     || areEqual "${_status}" UPDATE_COMPLETE; then
+    _rescode=${TRUE};
+  else
+    _rescode=${FALSE};
+  fi
+
+  return ${_rescode};
+
+}
+# fun: retrieveStackStatus stack environment stackFullName client
+# api: public
+# txt: Retrieves the status of a given stack.
+# opt: stack: The stack name.
+# opt: stackFullName: The full stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the status could be queried; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the stack status.
+# use: if retrieveStackStatus "01-network" "pre-myClient-01-network" "pre" "myClient"; then
+# use:   echo "pre-client-01-network status -> ${RESULT}";
+# use: fi
+function retrieveStackStatus() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _stackFullName="${2}";
+  checkNotEmpty stackFullName "${_stackFullName}" 2;
+  local _environment="${3}";
+  checkNotEmpty environment "${_environment}" 3;
+  local _client="${4}";
+  local -i _rescode=${FALSE};
+  local _result;
+  local _awsProfile;
+
+  if retrieveAwsProfile "${_stack}" "${_environment}" "${_client}"; then
+    _awsProfile="${RESULT}";
+  else
+    exitWithErrorCode CANNOT_USE_AWS_CLI;
+  fi
+
+  local _region;
+  if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+    _region="${RESULT}";
+  else
+    _region="eu-west-1";
+  fi
+
+  if checkCloudformationStackStatus "${_stackFullName}" "${_region}" "${_awsProfile}"; then
+    _rescode=${TRUE};
+    _result="${RESULT:-unknown}";
+    if areEqual "${_result}" 'User Initiated'; then
+      _result="CREATE_IN_PROGRESS";
+    fi
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: checkStackStatus stack stackName environment
+# api: public
+# txt: Checks the status of the stack.
+# opt: stack: The stack.
+# opt: stackName: The stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the stack could be checked; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the status reported by AWS.
+# use: if checkStackStatus "my-stack" "client-my-stack" "pre" "${CLIENT}"; then
+# use:   echo "Stack status -> ${RESULT}";
+# use: fi
+function checkStackStatus() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _environment="${3}";
+  checkNotEmpty environment "${_environment}" 3;
+  local _client="${4}";
+  local _result;
+
+  logDebug -n "Retrieving the status of ${_stack} (${_stackName})";
+
+  if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
+    local _result="${RESULT}";
+
+    if isStackDeployed "${_result}"; then
+      logDebugResult SUCCESS "${_result}";
+    else
+      logDebugResult FAILURE "${_result}";
+    fi
+  else
+    logDebugResult FAILURE "missing";
+  fi
+
+  return ${TRUE};
+}
+
+# fun: waitUntilStackFinishes stack stackName environment
+# api: public
+# txt: Waits until the stack is created or gets rolled back.
+# opt: stack: The stack.
+# opt: stackName: The stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the stack gets created successfully; 1/${FALSE} otherwise.
+# use: if waitUntilStackFinishes "my-stack" "pre" "${CLIENT}"; then
+# use:   echo "my-stack has been created successfully in pre";
+# use: fi
+function waitUntilStackFinishes() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _environment="${3}";
+  checkNotEmpty environment "${_environment}" 3;
+  local _client="${4}";
+  local -i _rescode=${FALSE};
+  local _status;
+
+  logInfo -n "Waiting for ${_stackName} to deploy ";
+  if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
+    _status="${RESULT}";
+
+    while ! isStackDeployed "${_status}"; do
+      if areEqual "${_status}" ROLLBACK_COMPLETE; then
+        _rescode=${FALSE};
+        break;
+      fi
+      sleep ${STACK_CHECK_INTERVAL};
+      if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
+        _status="${RESULT}";
+        _rescode=${TRUE};
+      else
+        _rescode=${FALSE};
+        break;
+      fi
+    done
+  else
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    logInfoResult SUCCESS "${_status}";
+  else
+    logInfoResult FAILURE "${_status}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: readSettings stack environment
+# api: public
+# txt: Reads stack settings.
+# opt: stack: The stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the settings are read successfully; 1/${FALSE} otherwise.
+# use: if readSettings "my-stack" "pre" "myClient"; then
+# use:   echo "my-stack settings read successfully";
+# use: fi
+function readSettings() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _client="${3}";
+  local -i _rescode=${TRUE};
+  local _f;
+
+  if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
+    local _configFiles="${RESULT}";
+    local _oldIFS="${IFS}";
+    IFS="${DWIFS}";
+    for _f in ${_configFiles}; do
+      IFS="${_oldIFS}";
+      if fileExists "${_f}"; then
+        logTrace -n "Reading ${_f} file";
+        source ${_f} 2> /dev/null;
+        _rescode=$?;
+        if isTrue ${_rescode}; then
+          logTraceResult SUCCESS "done";
+        else
+          logTraceResult FAILURE "failed";
+          break;
+        fi
+      fi
+    done
+    IFS="${_oldIFS}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveTemplateFile stack
+# api: public
+# txt: Retrieves the template file.
+# opt: stack: The stack name.
+# txt: Returns 0/${TRUE} if the template file exists; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the path of the template file.
+# use: if retrieveTemplateFile "network"; then
+# use:   echo "Template file -> ${RESULT}";
+# use: else
+# use:   echo "Template file for 'network' not found";
+# use: fi
+function retrieveTemplateFile() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _result;
+  local -i _rescode=${FALSE};
+
+  local _folder="$(basename ${_stack})";
+  _result="${_stack}/${_folder}.json";
+  if fileExists "${_result}"; then
+    if minify_json_file "${_result}"; then
+      # RESULT is already exported by minify_json_file
+      _rescode=${TRUE};
+    else
+      exitWithErrorCode CANNOT_MINIFY_TEMPLATE "${_result}";
+    fi
+  else
+    _rescode=${FALSE}
+  fi
+
+  return ${_rescode};
+}
+
+# fun: minify_json_file input
+# api: public
+# txt: Minifies given JSON file.
+# opt: input: The JSON to minify.
+# txt: Returns 0/${TRUE} if the JSON gets minified; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the path of the minified file.
+# use: if minify_json_file "/tmp/my-file.json"; then
+# use:   echo "Minified file -> ${RESULT}";
+# use: else
+# use:   echo "Cannot minify /tmp/my-file.json";
+# use: fi
+function minify_json_file() {
+  local _input="${1}";
+  checkNotEmpty input "${_input}" 1;
+  local _result;
+  local -i _rescode;
+
+  if createTempFile; then
+    _result="${RESULT}";
+
+    jq -c . < "${_input}" > "${_result}" 2> /dev/null
+    _rescode=$?;
+  else
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  else
+    logInfo "Error minifying ${_input}";
+    jq -c . < "${_input}"
+    export RESULT="";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: buildStackName stack environment indexes client?
+# api: public
+# txt: Builds the final name for the stack.
+# opt: stack: The stack name.
+# opt: environment: The environment.
+# opt: indexes: The stack indexes. If multiple, pass them as a single argument.
+# opt: client: The client. Can be empty.
+# txt: Returns 0/TRUE always.
+# txt: The variable RESULT contains the final name of the stack.
+# use: buildStackName "network" "pre" 1 "my_client";
+# use: echo "Final name: ${RESULT}";
+function buildStackName() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _indexes="${3}";
+  checkNotEmpty indexes "${_indexes}" 3;
+  local _client="${4}";
+  local _result="${_environment}";
+
+  if isNotEmpty "${_client}" && isNotEmpty "${OMIT_CLIENT_IN_STACK_NAME}" && isFalse ${OMIT_CLIENT_IN_STACK_NAME}; then
+    _result="${_result}-${_client}";
+  fi
+
+  if isNotEmpty "${OMIT_CONTESTIA_IN_STACK_NAME}" && isFalse ${OMIT_CONTESTIA_IN_STACK_NAME}; then
+    _result="${_result}-contestia";
+  fi
+
+  local _indexArray=(${_indexes});
+  local _stackArray=($(echo ${_stack} | sed 's|/| |g'));
+
+  local _pieces="$(echo ${_stack} | awk -F'/' '{print NF;}')";
+  local _piece;
+  local _oldIFS="${IFS}";
+  IFS="${DWIFS}";
+  for _piece in $(seq 0 $((_pieces-1))); do
+    retrieveNthIndexOfPath "${_stack}" ${_piece};
+    local _index="${RESULT}";
+    _result="${_result}-${_index}-${_stackArray[${_piece}]}";
+  done
+
+  export RESULT="${_result}";
+}
+
+# fun: retrieveIndex stack
+# api: public
+# txt: Retrieves the stack index.
+# opt: stack: The stack.
+# txt: Returns 0/${TRUE} if the stack index could be guessed; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the stack index.
+# use: if retrieveIndex "network"; then
+# use:   echo "Stack index for 'network' -> ${RESULT}";
+# use: else
+# use:   echo "Could not find out the stack index for 'network'";
+# use: fi
+function retrieveIndex() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _result;
+  local -i _rescode=${FALSE};
+
+  if fileExists "${_stack}/index"; then
+    _result="$(cat "${_stack}/index")";
+    if isNotEmpty "${_result}"; then
+      _rescode=${TRUE};
+    fi
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveIndexes stack
+# api: public
+# txt: Retrieves the stack index.
+# opt: stack: The stack.
+# txt: Returns 0/${TRUE} if the stack index could be guessed; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the stack index.
+# use: if retrieveIndexes "network"; then
+# use:   echo "Stack indexes for 'network' -> ${RESULT}";
+# use: else
+# use:   echo "Could not find out the stack index for 'network'";
+# use: fi
+function retrieveIndexes() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _result;
+  local -i _rescode=${FALSE};
+
+  if retrieveIndex "${_stack}"; then
+    local -i _pieces="$(echo "${_stack}" | awk -F'/' '{print NF};')";
+
+    for _piece in $(seq 1 ${_pieces}); do
+      local _category="$(echo "${_stack}" | awk -F'/' -v pos=${_piece} '{ for(i=1;i<=pos;i++){ printf("%s/", $i); }}' | sed 's /$  g')";
+      if    isNotEmpty "${_category}" \
+         && retrieveIndex "${_category}"; then
+        _rescode=${TRUE};
+        local _index="${RESULT}";
+        if isNotEmpty "${_result}"; then
+          _result="${_result} ";
+        fi
+        _result="${_result}${_index}";
+      else
+        break;
+      fi
+    done
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveNthIndexOfPath path nth
+# api: public
+# txt: Retrieves the nth index of given path.
+# opt: path: The path.
+# opt: nth: The nth position we are interested in (0-based).
+# txt: Returns 0/${TRUE} if the index could be extracted; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the index.
+# use: if retrieveNthIndexOfPath "base/network" 2; then
+# use:   echo "Index for 'network' in 'base/network' -> ${RESULT}";
+# use: else
+# use:   echo "Could not find out the index for 'network' in 'base/network'";
+# use: fi
+function retrieveNthIndexOfPath() {
+  local _path="${1}";
+  checkNotEmpty path "${_path}" 1;
+  local _nth="${2}";
+  checkNotEmpty nth "${_nth}" 2;
+  checkNumber nth "${_nth}" 2;
+
+  local _result;
+  local -i _rescode=${FALSE};
+
+  local -i _pieces="$(echo "${_path}" | awk -F'/' '{print NF};')";
+
+  local _category="$(echo "${_path}" | awk -F'/' -v pos=$((_nth+1)) '{ for(i=1;i<=pos;i++){ printf("%s/", $i); }}' | sed 's /$  g')";
+  if    isNotEmpty "${_category}" \
+     && retrieveIndex "${_category}"; then
+    _rescode=${TRUE};
+    _result="${RESULT}";
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveAwsProfile stack enviroment client?
+# api: public
+# txt: Retrieves the AWS profile.
+# opt: stack: The stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/TRUE if the profile was found; 1/FALSE otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the AWS profile.
+# use: if retrieveAwsProfile "network" "${ENVIRONMENT}" "${CLIENT}"; then
+# use:   echo "Using profile ${RESULT}";
+# use: fi
+function retrieveAwsProfile() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _client="${3}";
+  local _result;
+  local _aux;
+  local -i _rescode=${FALSE};
+  local _f;
+  local _oldIFS="${IFS}";
+
+  if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
+    local _configFiles="${RESULT}";
+    IFS="${DWIFS}";
+    for _f in ${_configFiles}; do
+      IFS="${_oldIFS}";
+      logTrace -n "Looking for profile information in ${_f}";
+      _result="$(grep -e "^AWS_PROFILE=" "${_f}" | awk -F'=' '{print $2}')";
+      _rescode=$?;
+      if isTrue ${_rescode}; then
+        logTraceResult SUCCESS "${_result}";
+        break;
+      else
+        logTraceResult FAILURE "not found";
+      fi
+    done
+    IFS="${_oldIFS}";
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  else
+    normalizeUppercase "${_environment}_${_client}";
+    _envUpcased="${RESULT}";
+    logTrace -n "Retrieving the default profile for ${_environment} environment (${_envUpcased}_AWS_PROFILE)";
+    local -n _aux="${_envUpcased}_AWS_PROFILE";
+    _result="${_aux}";
+    if isEmpty "${_result}"; then
+      logTraceResult NEUTRAL "missing";
+      _rescode=${FALSE};
+    else
+      logTraceResult SUCCESS "${_result}";
+      export RESULT="${_result}";
+      _rescode=${TRUE};
+    fi
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveAwsRegion stack environment client?
+# api: public
+# txt: Retrieves the AWS profile.
+# opt: stack: The stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/TRUE if the AWS region could be retrieved; 1/FALSE otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the AWS region.
+# use: if retrieveAwsRegion "network" "${ENVIRONMENT}" "${CLIENT}"; then
+# use:   echo "Using region ${RESULT}";
+# use: fi
+function retrieveAwsRegion() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _client="${3}";
+  local _result;
+  local _aux;
+  local -i _rescode;
+  local _f;
+
+  local _oldIFS="${IFS}";
+  IFS="${DWIFS}";
+  if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
+    local _configFiles="${RESULT}";
+    for _f in ${_configFiles}; do
+      IFS="${_oldIFS}";
+      logTrace -n "Looking for region information in ${_f}";
+      _result="$(grep -e "^AWS_REGION=" "${_f}" | awk -F'=' '{print $2;}')";
+      _rescode=$?;
+      if isTrue ${_rescode}; then
+        logTraceResult SUCCESS "${_result}";
+        break;
+      else
+        logTraceResult FAILURE "not found";
+      fi
+    done
+    IFS="${_oldIFS}";
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  else
+    normalizeUppercase "${_environment}_${_client}";
+    _envUpcased="${RESULT}";
+    logTrace -n "Retrieving the default region for ${_environment} environment (${_envUpcased}_AWS_REGION)";
+    local -n _aux="${_envUpcased}_AWS_REGION";
+    _result="${_aux}";
+    if isEmpty "${_result}"; then
+      logTraceResult NEUTRAL "missing"
+	    logTrace -n "Using 'eu-west-1' as default region"
+	    export RESULT="eu-west-1";
+      _rescode=${TRUE};
+    else
+      logTraceResult SUCCESS "${_result}";
+      export RESULT="${_result}";
+      _rescode=${TRUE};
+    fi
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveConfigFiles stack environment client?
+# api: public
+# txt: Retrieves the ordered list of the config files for given stack.
+# opt: stack: The name of the stack.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/TRUE if at least one config file is found; 1/FALSE otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains a space-separated list of config files.
+# use: if retrieveConfigFiles "network" "pre" "client1"; then
+# use:   echo "Config files: ${RESULT}";
+# use: fi
+function retrieveConfigFiles() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _client="${3}";
+
+  local -i _rescode=${FALSE};
+  local _result="";
+  local _oldIFS="${IFS}";
+  local _f;
+
+  local _folder="$(basename ${_stack})";
+  IFS="${DWIFS}";
+  for _f in default.config \
+            ${_stack}/${_folder}.config \
+            ${_environment}.config \
+            ${_stack}/${_environment}.config \
+            ${_client}.config \
+            ${_environment}-${_client}.config \
+            ${_stack}/${_client}.config \
+            ${_stack}/${_environment}-${_client}.config; do
+    IFS="${_oldIFS}";
+    logTrace -n "Checking if ${_f} exists";
+    if fileExists "${_f}"; then
+      logTraceResult SUCCESS "present";
+      _rescode=${TRUE};
+      if isNotEmpty "${_result}"; then
+        _result="${_result} ";
+      fi
+      _result="${_result}${_f}";
+    else
+      logTraceResult NEUTRAL "missing";
+    fi
+  done;
+  IFS="${_oldIFS}";
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveOptimizedAmiFamily ec2InstanceType
+# api: public
+# txt: Retrieves the optimized AMI family of the EC2 instances based on their instance type.
+# opt: ec2InstanceType: The EC2 instance type. Optional.
+# txt: Returns 0/${TRUE} always.
+# txt: The variable RESULT contains either "amazon-linux-2", "amazon-linux-2/arm64", "amazon-linux-2/gpu" or "amazon-linux-2/inf".
+# use: if retrieveOptimizedAmiFamily "t2.medium"; then
+# use:   echo "Optimized AMI family: ${RESULT}";
+# use: fi
+function retrieveOptimizedAmiFamily() {
+  local _instanceType="${1}";
+
+  local _result="amazon-linux-2";
+
+  if isNotEmpty "${_instanceType}"; then
+    if contains "${_instanceType}" "a1."; then
+      _result="amazon-linux-2/arm64";
+    elif contains "${_instanceType}" "m6g."; then
+      _result="amazon-linux-2/arm64";
+    fi
+  fi
+
+  export RESULT="${_result}";
+
+  return ${TRUE};
+}
+
+# fun: parametersToKeyValuePairs stackName stack environment client?
+# api: public
+# txt: Converts the stack parameters to key=value pairs, key in camel case.
+# opt: awsProfile: The AWS profile.
+# opt: stackName: The stack name.
+# opt: stack: The stack.
+# opt: environment: The environment.
+# opt: client: The client (optional).
+# txt: Returns 0/${TRUE} if the stack parameters could be converted; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the pairs of all parameters defined in deploy-stack.inc.sh.
+# use: if parametersToKeyValuePairs "my-profile" "pre-groucho-1-network" "network" "pre" "client1"; then
+# use:   echo "'network' parameters: ${RESULT}";
+# use: fi
+function parametersToKeyValuePairs() {
+  local _awsProfile="${1}";
+  checkNotEmpty awsProfile "${_awsProfile}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _environment="${4}";
+  checkNotEmpty environment "${_environment}" 4;
+  local _client="${5}";
+  local _otherStacks;
+  local _otherStack;
+  local _otherStackIndexes;
+  local _otherStackName;
+  local _camelCasedStackName;
+  local _result="";
+  local _inputFiles="";
+  local -i _rescode;
+  local _auxFile;
+  local _f;
+
+  _result="ParameterKey=Environment,ParameterValue=${_environment} ParameterKey=StackName,ParameterValue=${_stackName}";
+#  _result="ParameterKey=StackName,ParameterValue=${_stackName}";
+  if retrieveDependentStacks "${_stack}"; then
+    local _dependentStacks="${RESULT}";
+    local _oldIFS="${IFS}";
+    IFS="${DWIFS}";
+    for _otherStack in ${_dependentStacks}; do
+      IFS="${_oldIFS}";
+      retrieveIndexes "${_otherStack}";
+      _otherStackIndexes="${RESULT}";
+      if isEmpty "${_otherStackIndexes}"; then
+        exitWithErrorCode MISSING_STACK_INDEX "${_otherStack}";
+      else
+        buildStackName "${_otherStack}" "${_environment}" "${_otherStackIndexes}" "${_client}";
+        _otherStackName="${RESULT}";
+        toCamelCase "$(echo ${_otherStack} | tr '[A-Z]' '[a-z]')_stack_name";
+        _camelCasedStackName="${RESULT}";
+        _result="${_result} ParameterKey=${_camelCasedStackName},ParameterValue=${_otherStackName}";
+      fi
+    done
+    IFS="${_oldIFS}";
+  fi
+
+  if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
+    _inputFiles="${RESULT}";
+    createTempFile;
+    _auxFile="${RESULT}";
+
+    IFS="${DWIFS}";
+    for _f in ${_inputFiles}; do
+      IFS="${_oldIFS}";
+      cat ${_f} >> ${_auxFile};
+      echo >> ${_auxFile}
+    done
+    IFS="${_oldIFS}";
+
+    if grep "AMI_ID" "${_auxFile}" 2>&1 > /dev/null; then
+      if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+        local _region="${RESULT}";
+        local _ec2InstanceType="$(grep "EC2_INSTANCE_TYPE" "${_auxFile}")";
+        retrieveOptimizedAmiFamily "${_ec2InstanceType}";
+        local _ec2Architecture="${RESULT}";
+        if retrieveOptimizedAmiId "${_awsProfile}" "${_region}" "${_ec2Architecture}"; then
+          local _amiId="${RESULT}";
+          _result="${_result} ParameterKey=AmiId,ParameterValue=${_amiId}";
+        fi
+      fi
+    fi
+
+    _result="${_result} $(cat "${_auxFile}" | grep -v AMI_ID | sort -u | uniq | grep -v -e '^#' | grep -v -e '^\s*$' | grep -v 'AWS_PROFILE' | awk -F'=' '{if (keys[$1] == null || length(keys[$1] == 0)) {print $0;}; keys[$1]=$1;}' | awk -F'=' 'function toCamel(s) { camel = ""; split(s, words, /-|[^a-zA-Z0-9]/); for (i = 1; i in words; i++){camel = camel toupper(substr(words[i], 1, 1)) tolower(substr(words[i], 2)) }; return camel } { gsub(/"/, "", $2); printf(" ParameterKey=%s,ParameterValue=%s", toCamel($1), $2);}')";
+  fi
+
+  export RESULT="${_result}";
+}
+
+# fun: retrieveOptimizedAmiId awsProfile region
+# api: public
+# txt: Retrieves the id of the optimized AMI for given region.
+# opt: awsProfile: The AWS profile.
+# opt: region: The region.
+# txt: Returns 0/TRUE if the id could be retrieved; 1/FALSE otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the AMI id.
+# use: if retrieveOptimizedAmiId "mine" "us-east-1"; then
+# use:   echo "AMI ID: ${RESULT}";
+# use: fi
+function retrieveOptimizedAmiId() {
+  local _awsProfile="${1}";
+  checkNotEmpty awsProfile "${_awsProfile}" 1;
+  local _region="${2}";
+  checkNotEmpty region "${_region}" 2;
+  local _family="${3}";
+  checkNotEmpty family "${_family}" 3;
+
+  local _type;
+
+  local _result;
+
+  _result="$($(which aws) --profile "${_awsProfile}" ssm get-parameters --names /aws/service/ecs/optimized-ami/${_family}/recommended/image_id --region "${_region}" | jq '. | .Parameters[].Value' | tr -d '"')";
+  local -i _rescode=$?;
+
+  if isEmpty "${_result}"; then
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveStacksInCategory category
+# api: public
+# txt: Retrieves the stacks in given category.
+# opt: category: The category.
+# txt: Returns 0/TRUE if there's any stack in given category.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the space-separated list of stacks.
+# use: if retrieveStacksInCategory myCategory; then
+# use:   echo "Stacks in myCategory: ${RESULT}";
+# use: fi
+function retrieveStacksInCategory() {
+  local _category="${1}";
+  checkNotEmpty category "${_category}" 1;
+
+  local -i _rescode=${FALSE};
+  local _result;
+
+  local _potentialStacks="$(find ${_category} -maxdepth 1 -type d | sed "s ${_category}/  g" | grep -v -e "^${_category}$")";
+  local _potentialStack;
+  local _oldIFS="${IFS}";
+  IFS="${DWIFS}";
+  for _potentialStack in ${_potentialStacks}; do
+    IFS="${_oldIFS}";
+    if fileExists "${_category}/${_potentialStack}/index"; then
+      _rescode=${TRUE};
+      if isNotEmpty "${_result}"; then
+        _result="${_result} ";
+      fi
+      _result="${_result}${_potentialStack}";
+    fi
+  done
+  IFS="${_oldIFS}";
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveStackChain
+# api: public
+# txt: Retrieves the stack chain.
+# txt: Returns 0/${TRUE} if the stack chain could be retrieved; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the stack chain.
+# use: if retrieveStackChain; then
+# use:   echo "The stack chain is ${RESULT}";
+# use: fi
+function retrieveStackChain() {
+  local _result;
+  local -i _rescode=${FALSE};
+
+  if retrieveCachedStackChain; then
+    _rescode=${TRUE};
+    _result="${RESULT}";
+  else
+    if retrieveCategories; then
+      local _categories="${RESULT}";
+      createTempFile;
+      local _auxFile="${RESULT}";
+
+      local _category;
+      local _categoryIndex=0;
+      local _oldIFS="${IFS}";
+      IFS="${DWIFS}";
+      for _category in ${_categories}; do
+        IFS="${_oldIFS}";
+
+        if retrieveIndex "${_category}"; then
+          _categoryIndex="${RESULT}";
+        else
+          exitWithErrorCode CANNOT_RETRIEVE_CATEGORY_INDEX "${_category}";
+        fi
+
+        local _stacks="";
+        if retrieveStacksInCategory "${_category}"; then
+          local _categoryStacks="${RESULT}";
+          if isNotEmpty "${_categoryStacks}"; then
+            _stacks="${_stacks} ";
+          fi
+          _stacks="${_stacks}${_categoryStacks}";
+        else
+          exitWithErrorCode NO_STACKS_IN_CATEGORY_FOUND "${_category}";
+        fi
+        IFS="${DWIFS}";
+        for _stack in ${_stacks}; do
+          IFS="${_oldIFS}";
+          if isStackEnabled "${_category}/${_stack}"; then
+            if retrieveIndexes "${_category}/${_stack}"; then
+              local _stackIndex="";
+              _stackIndexes="${RESULT}";
+              local _index;
+              IFS="${DWIFS}";
+              for _index in ${_stackIndexes}; do
+                IFS="${_oldIFS}";
+                if isNotEmpty "${_index}"; then
+                  if isNotEmpty "${_stackIndex}"; then
+                    _stackIndex="${_stackIndex}-";
+                  fi
+                  _stackIndex="${_stackIndex}${_index}";
+                fi
+              done
+              IFS="${_oldIFS}";
+            fi
+            cat <<EOF >> "${_auxFile}"
+${_stackIndex}=${_category}/${_stack}
+EOF
+          fi
+        done
+        IFS="${_oldIFS}";
+      done
+
+      _result="$(sort "${_auxFile}" | awk -F'=' '{print $2;}')";
+      _rescode=$?;
+      buildStackChainCacheFilename;
+      local _stackOrderFile="${RESULT}";
+      sort "${_auxFile}" | awk -F'=' '{print $2;}' > "${_stackOrderFile}";
+    else
+      exitWithErrorCode NO_CATEGORIES_FOUND;
+    fi
+  fi
+
+  if isEmpty "${_result}"; then
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: deployAll
+# api: public
+# txt: Manages the deployment of all stacks as a whole.
+# txt: Returns 0/TRUE always. In case of error, it exits.
+# use: deployAll;
+function deployAll() {
+  local _stack;
+
+  local _oldIFS="${IFS}";
+  local _file;
+  IFS="${DWIFS}";
+  for _file in .deploy-stack.inc.sh \
+               .deploy-stack.inc.sh.${CLIENT}-${ENVIRONMENT} \
+               .deploy-all.inc.sh.${CLIENT}-${ENVIRONMENT}; do
+    IFS="${_oldIFS}";
+    if fileExists "${_file}"; then
+      source "${_file}";
+    fi
+  done
+  IFS="${_oldIFS}";
+
+  if retrieveStackChain; then
+    local _chain="${RESULT}";
+
+    if retrieveLastFailedStack; then
+      local _lastStack="${RESULT}";
+      if retrieveRemainingStacks "${_lastStack}" "${_chain}"; then
+        _chain="${RESULT}";
+      fi
+    fi
+
+    IFS="${DWIFS}";
+    for _stack in ${_chain}; do
+      IFS="${_oldIFS}";
+      if isStackCreated "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
+        logInfo -n "${_stack}";
+        logInfoResult NEUTRAL "deployed";
+      else
+        cacheStackAsNotDeployed "${_stack}";
+        if createOrUpdateStack "${_stack}" "${ACTION}" "${ENVIRONMENT}" "${CLIENT}"; then
+          cacheStackAsSuccessfullyDeployed "${_stack}";
+        fi
+      fi
+    done
+    IFS="${_oldIFS}";
+  else
+    exitWithErrorCode CANNOT_RETRIEVE_THE_STACK_CHAIN;
+  fi
+}
+
+# fun: retrieveRemainingStacks stack chain
+# api: public
+# txt: Retrieves the remaning stacks after the one given, in the chain.
+# opt: stack: The first stack to consider in the chain.
+# opt: chain: The stack chain.
+# txt: Returns 0/TRUE if the stack was in the chain; 1/FALSE otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the last part of the chain, starting with given stack.
+# use: if retrieveRemainingStacks "permissions" "${CHAIN}"; then
+# use:   echo "Remaining: ${RESULT}";
+# use: fi
+function retrieveRemainingStacks() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _chain="${2}";
+  checkNotEmpty chain "${_chain}" 2;
+
+  local -i _rescode=${FALSE};
+  local _result;
+
+  local _oldIFS="${IFS}";
+  IFS="${DWIFS}";
+  local _item;
+  local -i _includeItem=${FALSE};
+
+  for _item in ${_chain}; do
+    if areEqual "${_item}" "${_stack}"; then
+      _includeItem=${TRUE};
+      _rescode=${TRUE};
+    fi
+    if isTrue ${_includeItem}; then
+      if isNotEmpty "${_result}"; then
+        _result="${_result} ";
+      fi
+      _result="${_result}${_item}";
+    fi
+  done
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveLastFailedStack
+# api: public
+# txt: Retrieves the stack that failed last time.
+# txt: Returns 0/TRUE if the last time any stack failed; 1/FALSE otherwise.
+# txt: If the function returs 0/TRUE, the variable RESULT contains the failed stack.
+# use: if retrieveLastFailedStack; then
+# use:   echo "Retrying ${RESULT}";
+# use: fi
+function retrieveLastFailedStack() {
+  local -i _rescode=${FALSE};
+  local _result;
+
+  buildLastFailedStackCacheFilename;
+  local _cacheFile="${RESULT}";
+  if fileExists "${_cacheFile}"; then
+    _result="$(cat "${_cacheFile}" 2> /dev/null)";
+    _rescode=$?;
+  fi
+
+  if isEmpty "${_result}"; then
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: cacheStackAsNotDeployed
+# api: public
+# txt: Writes the name of the last failed stack to disk as cache.
+# txt: Returns 0/TRUE if the name of the last failed stack could be cached.
+# use: if cacheStackAsNotDeployed; then
+# use:   echo "stack annotated as not yet deployed";
+# use: fi
+function cacheStackAsNotDeployed() {
+   local _stack="${1}";
+   checkNotEmpty stack "${_stack}" 1;
+
+   local -i _rescode=${FALSE};
+
+   buildLastFailedStackCacheFilename;
+   local _stackFile="${RESULT}";
+   cat <<EOF > "${_stackFile}";
+${_stack}
+EOF
+
+   return ${_rescode};
+ }
+
+# fun: cacheStackAsSuccessfullyDeployed
+# api: public
+# txt: Ensures given stack is annotated as not failed in the cache.
+# txt: Returns 0/TRUE always.
+# use: cacheStackAsSuccessfullyDeployed "permissions";
+function cacheStackAsSuccessfullyDeployed() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  buildLastFailedStackCacheFilename;
+  local _stackFile="${RESULT}";
+  if cat "${_stackFile}" 2> /dev/null | grep "${_stack}" > /dev/null; then
+    echo -n '' > "${_stackFile}";
+  fi
+
+  return ${TRUE};
+}
+
+# fun: buildLastFailedStackCacheFilename
+# api: public
+# txt: Builds the filename of the last failed stack cache.
+# txt: Returns 0/TRUE always.
+# txt: The variable RESULT contains the filename.
+# use: buildLastFailedStackCacheFilename;
+# use: echo "Last failed stack cache file: ${RESULT}";
+function buildLastFailedStackCacheFilename() {
+  DW.getScriptName;
+  local _scriptName="${RESULT}";
+  removePrefix "${_scriptName}" "./";
+  export RESULT=".${RESULT}.last-failed-stack-${ENVIRONMENT}-${CLIENT}";
+}
+
+# fun: retrieveCategories
+# api: public
+# txt: Retrieves the categories.
+# txt: Returns 0/TRUE if there's at least one category.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the space-separated list of categories.
+# use: if retrieveCategories; then
+# use:   echo "Categories found: ${RESULT}";
+# use: fi
+function retrieveCategories() {
+  local -i _rescode=${FALSE};
+  local _result;
+
+  local _potentialCategories="$(find . -name 'index' | sed 's ^./  g' | grep -v -e '^\..*$' | sort | sed 's /index$  g')";
+  local _potentialCategory;
+  local _oldIFS="${IFS}";
+  IFS="${DWIFS}";
+  for _potentialCategory in ${_potentialCategories}; do
+    IFS="${_oldIFS}";
+    if retrieveStacksInCategory "${_potentialCategory}"; then
+      _rescode=${TRUE};
+      if isNotEmpty "${_result}"; then
+        _result="${_result} ";
+      fi
+      _result="${_result}${_potentialCategory}";
+    fi
+  done
+  IFS="${_oldIFS}";
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveCachedStackChain
+# api: public
+# txt: Retrieves the cached stack chain.
+# txt: Returns 0/TRUE if the cached stack chains is available.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the cached stack chain.
+# use: if retrieveCachedStackChain; then
+# use:   echo "chain: ${RESULT}";
+# use: fi
+function retrieveCachedStackChain() {
+  local -i _rescode=${FALSE};
+  local _result;
+
+  buildStackChainCacheFilename;
+  local _cacheFile="${RESULT}";
+  if fileExists "${_cacheFile}"; then
+    _result="$(cat "${_cacheFile}" 2> /dev/null)";
+    _rescode=$?;
+  fi
+
+  if isEmpty "${_result}"; then
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: buildStackChainCacheFilename
+# api: public
+# txt: Builds the filename of the stack chain cache.
+# txt: Returns 0/TRUE always.
+# txt: The variable RESULT contains the filename.
+# use: buildStackChainCacheFilename;
+# use: echo "Cache file: ${RESULT}";
+function buildStackChainCacheFilename() {
+  DW.getScriptName;
+  local _scriptName="${RESULT}";
+  removePrefix "${_scriptName}" "./";
+  export RESULT=".${RESULT}.stack-chain-${ENVIRONMENT}-${CLIENT}";
+}
+
+# errors
+addError STACK_FOLDER_DOES_NOT_EXIST "stack folder not found";
+addError INVALID_CLOUDFORMATION_TEMPLATE "Invalid CloudFormation template";
+addError MISSING_STACK_SETTINGS ".config file not found for stack";
+addError MISSING_TEMPLATE_FILE "template file not found";
+addError MISSING_STACK_INDEX "Missing index for stack ";
+addError ERROR_DEPLOYING_STACK "Error deploying stack";
+addError CANNOT_MINIFY_TEMPLATE "Error minifying template";
+addError ERROR_CHECKING_STACK_STATUS "Error checking the status of stack";
+addError PRECONDITIONS_NOT_MET "Preconditions not met in stack";
+addError PREHOOK_FAILED "pre-hook.sh failed";
+addError POSTCONDITIONS_NOT_MET "Postconditions not met in stack";
+addError POSTHOOK_FAILED "post-hook.sh failed";
+
+# environment variables
+defineEnvVar GIT_COMMIT OPTIONAL "The git commit used when deploying stacks" "b12c68a";
+defineEnvVar OMIT_CLIENT_IN_STACK_NAME OPTIONAL "Whether to omit the client in the stack name" ${FALSE};
+defineEnvVar OMIT_CONTESTIA_IN_STACK_NAME OPTIONAL "Whether to omit the 'contestia' word in the stack name" ${TRUE};
+defineEnvVar OMIT_STACKS OPTIONAL "The comma-separated values of stacks to omit" "";
+defineEnvVar STACK_CHECK_INTERVAL OPTIONAL "How often to check for the template deployment to finish" "10s";
+defineEnvVar DEFAULT_AWS_PROFILE OPTIONAL "The aws profile" "contestia-devops";
+defineEnvVar ECS_TASK_AMBASSADOR_IMAGE OPTIONAL "The ECS-TASK-Lite image" "406021078145.dkr.ecr.eu-west-1.amazonaws.com/ecs-task-kite:latest";
+# vim: syntax=sh ts=2 sw=2 sts=4 sr noet

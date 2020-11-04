@@ -1,0 +1,61 @@
+# mod: empty-buckets.dw
+# api: public
+# txt: Empties buckets of a certain Contestia stack.
+
+DW.import aws-s3;
+
+source $(dirname ${BASH_SOURCE[0]})/contestia.dw;
+
+# fun: emptyBuckets
+# api: public
+# txt: Empties buckets of a certain Contestia stack.
+# txt: Returns 0/TRUE always, but can exit if some problem occurs.
+# use: main;
+function emptyBuckets() {
+  local _domainName;
+  if getContestiaDomainName "${ENVIRONMENT}" "${PROFILE}"; then
+    _domainName="${RESULT}";
+  else
+    exitWithErrorCode CANNOT_RETRIEVE_CONTESTIA_DOMAIN_NAME;
+  fi
+
+  local _awsRegion;
+  if retrieveAwsRegionForProfile "${PROFILE}"; then
+    _awsRegion="${RESULT}";
+  else
+    exitWithErrorCode CANNOT_RETRIEVE_AWS_REGION;
+  fi
+
+  getBucketNames "${_domainName}" "${ENVIRONMENT}" "${PROFILE}";
+  local _bucketNames="${RESULT}";
+  local _oldIFS="${IFS}";
+  local _bucket;
+  IFS="${DWIFS}";
+  for _bucket in ${_bucketNames}; do
+    IFS="${_oldIFS}";
+    logInfo -n "Checking if ${_bucket} actually exists";
+    if s3BucketAlreadyExists "${_bucket}" "${PROFILE}"; then
+      logInfoResult SUCCESS "exists";
+      logInfo -n "Emptying ${_bucket}";
+      if emptyS3Bucket "${_bucket}" "${PROFILE}" "${_awsRegion}"; then
+        logInfoResult SUCCESS "done";
+      else
+        logInfoResult FAILURE "failed";
+        logDebug "${ERROR}";
+      fi
+    else
+      logInfoResult NEUTRAL "missing";
+    fi
+  done;
+  IFS="${_oldIFS}";
+}
+
+# Script metadata
+addCommandLineParameter environment "The Contestia environment" MANDATORY SINGLE;
+addCommandLineParameter profile "The AWS profile" MANDATORY SINGLE;
+
+DW.getScriptFolder;
+# env: STACK_NAME_SUFFIX: The suffix of the stack. Defaults to -contestia-$(cat index)-[stackName]
+defineEnvVar STACK_NAME_SUFFIX MANDATORY "The suffix the stack" "-contestia-$(cat index)-$(basename ${RESULT})";
+
+# vim: syntax=sh ts=2 sw=2 sts=4 sr noet
