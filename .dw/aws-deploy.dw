@@ -199,11 +199,7 @@ function awsDeleteStack() {
     _region="eu-west-1";
   fi
 
-  echo 1;
-  logTrace "$(which aws) --profile ${_awsProfile} --region ${_region} cloudformation delete-stack --stack-name \"${_stackName}\"";
-  echo 2;
-  local _output;
-  _output="$($(which aws) --profile "${_awsProfile}" --region ${_region} cloudformation delete-stack --stack-name "${_stackName}")";
+  requestDeleteStack "${_awsProfile}" "${_stackName}" "${_region}";
   local -i _rescode=$?;
 
   if isTrue ${_rescode}; then
@@ -639,27 +635,12 @@ function deployStack() {
   if parametersToKeyValuePairs "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
     local _parameters="${RESULT}";
     local _escapedParameters="$(echo "${_parameters}" | sed "s |_quote_| ' g")";
-    echo 3
-    logTrace "$(which aws) --profile ${_awsProfile} --region ${_region} cloudformation create-stack";
-    echo 4
-    logTrace "--stack-name \"${_stackName}\"";
-    logTrace "--tags Key=contestia:name,Value=${_stackName} Key=contestia:stack,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}";
-    logTrace "--template-body file://${_template}";
-    logTrace "--parameters ${_escapedParameters}";
-    logTrace "--capabilities CAPABILITY_NAMED_IAM;";
-
-    local _output;
-    createTempFile;
-    local _tmpFile="${RESULT}";
-    echo 5
-    cat <<EOF > "${_tmpFile}"
-#!/bin/sh
-
-$(which aws) --profile ${_awsProfile} --region ${_region} cloudformation ${_action}-stack --stack-name ${_stackName} --tags Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag} --template-body file://${_template} --parameters ${_escapedParameters} --capabilities CAPABILITY_NAMED_IAM;
-EOF
-    echo 6
-    chmod +x "${_tmpFile}";
-    _output="$(${_tmpFile})";
+    requestCreateStack "${_awsProfile}" \
+                       "${_stackName}" \
+                       "${_region}" \
+                       "${_template}" \
+                       "Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}" \
+                       "${_escapedParameters}";
     _rescode=$?;
   fi
 
@@ -1315,9 +1296,7 @@ function retrieveAwsProfile() {
       IFS="${_oldIFS}";
     fi
 
-    if isTrue ${_rescode}; then
-      export RESULT="${_result}";
-    else
+    if isFalse ${_rescode}; then
       normalizeUppercase "${_environment}_${_client}";
       _envUpcased="${RESULT}";
       logTrace -n "Retrieving the default profile for ${_environment} environment (${_envUpcased}_AWS_PROFILE)";
@@ -1328,11 +1307,13 @@ function retrieveAwsProfile() {
         _rescode=${FALSE};
       else
         logTraceResult SUCCESS "${_result}";
-        export RESULT="${_result}";
         _rescode=${TRUE};
       fi
     fi
-    AWS_DEPLOY.setCachedAwsProfile "${_result}";
+    if isTrue ${_rescode}; then
+      AWS_DEPLOY.setCachedAwsProfile "${_result}";
+      export RESULT="${_result}";
+    fi
   else
     export RESULT="${_cachedAwsProfile}";
     _rescode=${TRUE};
@@ -1386,9 +1367,7 @@ function retrieveAwsRegion() {
       IFS="${_oldIFS}";
     fi
 
-    if isTrue ${_rescode}; then
-      export RESULT="${_result}";
-    else
+    if isFalse ${_rescode}; then
       normalizeUppercase "${_environment}_${_client}";
       _envUpcased="${RESULT}";
       logTrace -n "Retrieving the default region for ${_environment} environment (${_envUpcased}_AWS_REGION)";
@@ -1401,11 +1380,14 @@ function retrieveAwsRegion() {
         _rescode=${TRUE};
       else
         logTraceResult SUCCESS "${_result}";
-        export RESULT="${_result}";
         _rescode=${TRUE};
       fi
     fi
-    AWS_DEPLOY.setCachedAwsRegion "${_result}";
+
+    if isTrue ${_rescode}; then
+      AWS_DEPLOY.setCachedAwsRegion "${_result}";
+      export RESULT="${_result}";
+    fi
   else
     export RESULT="${_cachedAwsRegion}";
     _rescode=${TRUE};
@@ -1616,10 +1598,8 @@ function retrieveOptimizedAmiId() {
 
   local _result;
 
-  echo 7
   _result="$($(which aws) --profile "${_awsProfile}" ssm get-parameters --names /aws/service/ecs/optimized-ami/${_family}/recommended/image_id --region "${_region}" | jq '. | .Parameters[].Value' | tr -d '"')";
   local -i _rescode=$?;
-  echo 8
   if isEmpty "${_result}"; then
     _rescode=${FALSE};
   fi
@@ -2331,7 +2311,7 @@ function AWS_DEPLOY.resetState() {
   # env: CACHED_AWS_REGION: The cached AWS region.
   DW.declareGlobalString "${_moduleName}" CACHED_AWS_REGION;
 
-  # env: CACHED_AWS_REGION: The cached AWS profile.
+  # env: CACHED_AWS_PROFILE: The cached AWS profile.
   DW.declareGlobalString "${_moduleName}" CACHED_AWS_PROFILE;
 }
 
