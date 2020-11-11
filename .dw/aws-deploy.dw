@@ -7,6 +7,18 @@
 DW.import aws-cli;
 DW.import aws-cloudformation;
 
+# fun: AWS_DEPLOY.getModuleName
+# api: private
+# txt: Retrieves the name of the module.
+# txt: Returns 0/TRUE always.
+# txt: The variable RESULT contains the name of the module.
+# use: AWS_DEPLOY.getModuleName;
+# use: echo "Module: ${RESULT}";
+function AWS_DEPLOY.getModuleName() {
+  export RESULT="AWS_DEPLOY";
+  return ${TRUE};
+}
+
 # fun: createOrUpdateStack stack action environment client
 # api: public
 # txt: Creates or updates a stack.
@@ -27,9 +39,83 @@ function createOrUpdateStack() {
   checkNotEmpty environment "${_environment}" 3;
   local _client="${4}";
 
-  getLogCategory;
-  local _logCategory="${RESULT}";
-  setLogCategory "deploy-stack";
+  if ! readSettings "${_stack}" "${_environment}" "${_client}"; then
+    exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
+  fi
+
+  if ! retrieveIndexes "${_stack}"; then
+    exitWithErrorCode MISSING_STACK_INDEX "${_stack}";
+  fi
+  local _stackIndexes="${RESULT}";
+  buildStackName "${_stack}" "${_environment}" "${_stackIndexes}" "${_client}";
+  export STACK_NAME="${RESULT}";
+
+  if isStackEnabled "${_stack}"; then
+
+    if ! checkStackDeploymentStatus "${_stack}" "${STACK_NAME}" "${_environment}" "${_client}"; then
+      exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${STACK_NAME}";
+    fi
+
+    local _status="${RESULT}";
+    if ! isStackDeployed "${_status}"; then
+      retrieveAwsProfile "${_stack}" "${_environment}" "${_client}";
+      local _awsProfile="${RESULT}";
+
+      if ! retrieveTemplateFile "${_stack}"; then
+        exitWithErrorCode MISSING_TEMPLATE_FILE "${_stack}/${_stack}.json";
+      fi
+      local _templateFile="${RESULT}";
+
+      if ! isCloudformationTemplateValid "${_templateFile}" "${_awsProfile}" "${_stack}"; then
+        exitWithErrorCode INVALID_CLOUDFORMATION_TEMPLATE "${_templateFile}";
+      fi
+
+      if ! runDeployPrehook "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode DEPLOY_PREHOOK_FAILED "${_stack}";
+      fi
+
+      displayDeployPreMessage "${_stack}";
+
+      if ! checkDeployPreconditions "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode DEPLOY_PRECONDITIONS_NOT_MET "${_stack}";
+      fi
+
+      if ! deployStack "${_awsProfile}" "${STACK_NAME}" "${_stack}" "${_templateFile}" "${_action}" "${_environment}" "${_client}"; then
+        exitWithErrorCode ERROR_DEPLOYING_STACK "${_stack}";
+      fi
+
+      displayDeployPostMessage "${_stack}";
+
+      if ! runDeployPosthook "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode DEPLOY_POSTHOOK_FAILED "${_stack}";
+      fi
+
+      if ! checkDeployPostconditions "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode DEPLOY_POSTCONDITIONS_NOT_MET "${_stack}";
+      fi
+    fi
+  else
+    logDebug -n "${_stack}";
+    logDebugResult NEUTRAL "skipped";
+  fi
+}
+
+# fun: deleteStack stack environment client
+# api: public
+# txt: Deletes a stack.
+# opt: stack: The stack.
+# opt: environment: The environment.
+# opt: client: The client (optional).
+# txt: Returns 0/${TRUE} if the stack gets deleted successfully; 1/${FALSE} otherwise.
+# use: if deleteStack "network" "pre" "myClient"; then
+# use:   echo "Stack network, in environment 'pre', for client' myClient', has been deleted successfully.";
+# use: fi
+function deleteStack() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _client="${3}";
 
   if ! readSettings "${_stack}" "${_environment}" "${_client}"; then
     exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
@@ -44,85 +130,133 @@ function createOrUpdateStack() {
 
   if isStackEnabled "${_stack}"; then
 
-    if ! checkStackStatus "${_stack}" "${STACK_NAME}" "${_environment}" "${_client}"; then
+    if ! checkStackDeletionStatus "${_stack}" "${STACK_NAME}" "${_environment}" "${_client}"; then
       exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${STACK_NAME}";
     fi
 
     local _status="${RESULT}";
-    if isStackDeployed "${_status}"; then
+    if isStackDeleted "${_status}"; then
       logDebug -n "${_stack}";
-      logDebugResult SUCCESS "deployed";
+      logDebugResult SUCCESS "already deleted";
     else
       retrieveAwsProfile "${_stack}" "${_environment}" "${_client}";
       local _awsProfile="${RESULT}";
 
-      if ! retrieveTemplateFile "${_stack}"; then
-        exitWithErrorCode MISSING_TEMPLATE_FILE "${_stack}/${_stack}.json";
-      fi
-      local _templateFile="${RESULT}";
-
-      if ! isCloudformationTemplateValid "${_templateFile}" "${_awsProfile}" "${_stack}"; then
-        exitWithErrorCode INVALID_CLOUDFORMATION_TEMPLATE "${_templateFile}";
+      if ! runDeletePrehook "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode DELETE_PREHOOK_FAILED "${_stack}";
       fi
 
-      if ! runPrehook "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
-        exitWithErrorCode PREHOOK_FAILED "${_stack}";
+      displayDeletePreMessage "${_stack}";
+
+      if ! checkDeletePreconditions "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode DELETE_PRECONDITIONS_NOT_MET "${_stack}";
       fi
 
-      displayPreMessage "${_stack}";
-
-      if ! checkPreconditions "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
-        exitWithErrorCode PRECONDITIONS_NOT_MET "${_stack}";
+      if ! awsDeleteStack "${_awsProfile}" "${STACK_NAME}" "${_environment}" "${_client}"; then
+        exitWithErrorCode ERROR_DELETING_STACK "${_stack}";
       fi
 
-      if ! deployStack "${_awsProfile}" "${STACK_NAME}" "${_stack}" "${_templateFile}" "${_action}" "${_environment}" "${_client}"; then
-        exitWithErrorCode ERROR_DEPLOYING_STACK "${_stack}";
-      fi
-      displayPostMessage "${_stack}";
+      displayDeletePostMessage "${_stack}";
 
-      if ! runPosthook "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
-        exitWithErrorCode POSTHOOK_FAILED "${_stack}";
+      if ! runDeletePosthook "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode DELETE_POSTHOOK_FAILED "${_stack}";
       fi
 
-      if ! checkPostconditions "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
-        exitWithErrorCode POSTCONDITIONS_NOT_MET "${_stack}";
+      if ! checkDeletePostconditions "${_awsProfile}" "${_environment}" "${_stack}" "${_client}"; then
+        exitWithErrorCode DELETE_POSTCONDITIONS_NOT_MET "${_stack}";
       fi
     fi
   else
     logDebug -n "${_stack}";
     logDebugResult NEUTRAL "skipped";
   fi
-
-  setLogCategory "${_logCategory}";
 }
 
-# fun: displayPreMessage stack
+# fun: awsDeleteStack awsProfile stackName environment client
+# api: public
+# txt: Requests the deletion of given stack.
+# opt: awsProfile: The AWS profile.
+# opt: stackName: The stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the stack gets deleted successfully; 1/${FALSE} otherwise.
+# use: if awsDeleteStack "my-profile" "pre-1-my-stack" "pre" "myClient"; then
+# use:   echo "pre-1-my-stack deleted successfully in pre";
+# use: fi
+function awsDeleteStack() {
+  local _awsProfile="${1}";
+  checkNotEmpty awsProfile "${_awsProfile}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _environment="${3}";
+  checkNotEmpty environment "${_environment}" 3;
+  local _client="${4}";
+
+  local _region;
+  if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+    _region="${RESULT}";
+  else
+    _region="eu-west-1";
+  fi
+
+  echo 1;
+  logTrace "$(which aws) --profile ${_awsProfile} --region ${_region} cloudformation delete-stack --stack-name \"${_stackName}\"";
+  echo 2;
+  local _output;
+  _output="$($(which aws) --profile "${_awsProfile}" --region ${_region} cloudformation delete-stack --stack-name "${_stackName}")";
+  local -i _rescode=$?;
+
+  if isTrue ${_rescode}; then
+    logTrace "${_output}";
+    waitUntilStackDeletionFinishes "${_stack}" "${_stackName}" "${_environment}" "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: displayDeployPreMessage stack
 # api: public
 # txt: Displays a message if the stack includes a pre-deployment message file.
 # opt: stack: The stack.
 # txt: Returns 0/${TRUE} if the message exists and is printed; 1/FALSE otherwise.
-# use: displayPreMessage base/network;
-function displayPreMessage() {
+# use: displayDeployPreMessage base/network;
+function displayDeployPreMessage() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
 
-  if fileExists "${_stack}/pre-message.txt"; then
-    sed "s|^|[${_stack}] |g" "${_stack}/pre-message.txt";
+  if fileExists "${_stack}/deploy-pre-message.txt"; then
+    sed "s|^|[${_stack}] |g" "${_stack}/deploy-pre-message.txt";
   fi
 }
 
-# fun: checkPreconditions profile environment stack client?
+# fun: displayDeletePreMessage stack
 # api: public
-# txt: Checks if the preconditions of the stack are met.
+# txt: Displays a message if the stack includes a pre-deletion message file.
+# opt: stack: The stack.
+# txt: Returns 0/${TRUE} if the message exists and is printed; 1/FALSE otherwise.
+# use: displayDeletePreMessage base/network;
+function displayDeletePreMessage() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  if fileExists "${_stack}/delete-pre-message.txt"; then
+    sed "s|^|[${_stack}] |g" "${_stack}/delete-pre-message.txt";
+  fi
+}
+
+# fun: checkDeployPreconditions profile environment stack client?
+# api: public
+# txt: Checks if the deploy preconditions of the stack are met.
 # opt: profile: The profile.
 # opt: environment: The environment.
 # opt: stack: The stack.
 # opt: client: The client. Optional.
-# txt: Returns 0/${TRUE} if the preconditions are met; 1/FALSE otherwise.
-# use: if checkPreconditions dev-myclient dev base/network myclient; then
-# use:   echo "Preconditions met";
+# txt: Returns 0/${TRUE} if the deploy preconditions are met; 1/FALSE otherwise.
+# use: if checkDeployPreconditions dev-myclient dev base/network myclient; then
+# use:   echo "Deploy preconditions met";
 # use: fi
-function checkPreconditions() {
+function checkDeployPreconditions() {
   local _profile="${1}";
   checkNotEmpty profile "${_profile}" 1;
   local _environment="${2}";
@@ -134,16 +268,48 @@ function checkPreconditions() {
 
   local -i _rescode=${TRUE};
 
-  if fileExists "${_stack}/check-preconditions.sh"; then
+  if fileExists "${_stack}/deploy-check-preconditions.sh"; then
     DW.getDryWitPath;
-    "${RESULT}" ${_stack}/check-preconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    "${RESULT}" ${_stack}/deploy-check-preconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
   return ${_rescode};
 }
 
-# fun: runPrehook profile environment stack client?
+# fun: checkDeletePreconditions profile environment stack client?
+# api: public
+# txt: Checks if the delete preconditions of the stack are met.
+# opt: profile: The profile.
+# opt: environment: The environment.
+# opt: stack: The stack.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the delete preconditions are met; 1/FALSE otherwise.
+# use: if checkDeletePreconditions dev-myclient dev base/network myclient; then
+# use:   echo "Delete preconditions met";
+# use: fi
+function checkDeletePreconditions() {
+  local _profile="${1}";
+  checkNotEmpty profile "${_profile}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  local -i _rescode=${TRUE};
+
+  if fileExists "${_stack}/delete-check-preconditions.sh"; then
+    DW.getDryWitPath;
+    "${RESULT}" ${_stack}/delete-check-preconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: runDeployPrehook profile environment stack client?
 # api: public
 # txt: Runs any pre-deployment hooks for given stack.
 # opt: profile: The profile.
@@ -151,10 +317,10 @@ function checkPreconditions() {
 # opt: stack: The stack.
 # opt: client: The client. Optional.
 # txt: Returns 0/${TRUE} if the hooks, if any, finish successfully; 1/FALSE otherwise.
-# use: if runPrehook dev-myclient dev base/network myclient; then
-# use:   echo "Pre hooks finished successfully";
+# use: if runDeployPrehook dev-myclient dev base/network myclient; then
+# use:   echo "Deploy pre hook finished successfully";
 # use: fi
-function runPrehook() {
+function runDeployPrehook() {
   local _profile="${1}";
   checkNotEmpty profile "${_profile}" 1;
   local _environment="${2}";
@@ -164,42 +330,27 @@ function runPrehook() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
-  if fileExists "${_stack}/pre-hook.sh"; then
+  if fileExists "${_stack}/deploy-pre-hook.sh"; then
     DW.getDryWitPath;
-    "${RESULT}" ${_stack}/pre-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    "${RESULT}" ${_stack}/deploy-pre-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
   return ${_rescode};
 }
 
-# fun: displayPostMessage stack
+# fun: runDeletePrehook profile environment stack client?
 # api: public
-# txt: Displays a message if the stack includes a post-deployment message file.
-# opt: stack: The stack.
-# txt: Returns 0/${TRUE} always.
-# use: displayPostMessage base/network;
-function displayPostMessage() {
-  local _stack="${1}";
-  checkNotEmpty stack "${_stack}" 1;
-
-  if fileExists "${_stack}/post-message.txt"; then
-    sed "s|^|[${_stack}] |g" "${_stack}/post-message.txt";
-  fi
-}
-
-# fun: checkPostconditions profile environment stack client?
-# api: public
-# txt: Checks if the postconditions of the stack are met.
+# txt: Runs any pre-deletement hooks for given stack.
 # opt: profile: The profile.
 # opt: environment: The environment.
 # opt: stack: The stack.
 # opt: client: The client. Optional.
-# txt: Returns 0/${TRUE} if the postconditions are met; 1/FALSE otherwise.
-# use: if checkPostconditions dev-myclient dev base/network myclient; then
-# use:   echo "Postconditions met";
+# txt: Returns 0/${TRUE} if the hooks, if any, finish successfully; 1/FALSE otherwise.
+# use: if runDeletePrehook dev-myclient dev base/network myclient; then
+# use:   echo "Delete pre hook finished successfully";
 # use: fi
-function checkPostconditions() {
+function runDeletePrehook() {
   local _profile="${1}";
   checkNotEmpty profile "${_profile}" 1;
   local _environment="${2}";
@@ -209,16 +360,106 @@ function checkPostconditions() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
-  if fileExists "${_stack}/check-postconditions.sh"; then
+  if fileExists "${_stack}/delete-pre-hook.sh"; then
     DW.getDryWitPath;
-    "${RESULT}" ${_stack}/check-postconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    "${RESULT}" ${_stack}/delete-pre-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
   return ${_rescode};
 }
 
-# fun: runPosthook profile environment stack client?
+# fun: displayDeployPostMessage stack
+# api: public
+# txt: Displays a message if the stack includes a post-deployment message file.
+# opt: stack: The stack.
+# txt: Returns 0/${TRUE} always.
+# use: displayDeployPostMessage base/network;
+function displayDeployPostMessage() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  if fileExists "${_stack}/deploy-post-message.txt"; then
+    sed "s|^|[${_stack}] |g" "${_stack}/deploy-post-message.txt";
+  fi
+}
+
+# fun: displayDeletePostMessage stack
+# api: public
+# txt: Displays a message if the stack includes a post-deletement message file.
+# opt: stack: The stack.
+# txt: Returns 0/${TRUE} always.
+# use: displayDeletePostMessage base/network;
+function displayDeletePostMessage() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  if fileExists "${_stack}/delete-post-message.txt"; then
+    sed "s|^|[${_stack}] |g" "${_stack}/delete-post-message.txt";
+  fi
+}
+
+# fun: checkDeployPostconditions profile environment stack client?
+# api: public
+# txt: Checks if the deploy postconditions of the stack are met.
+# opt: profile: The profile.
+# opt: environment: The environment.
+# opt: stack: The stack.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the deploy postconditions are met; 1/FALSE otherwise.
+# use: if checkDeployPostconditions dev-myclient dev base/network myclient; then
+# use:   echo "Deploy postconditions met";
+# use: fi
+function checkDeployPostconditions() {
+  local _profile="${1}";
+  checkNotEmpty profile "${_profile}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  if fileExists "${_stack}/deploy-check-postconditions.sh"; then
+    DW.getDryWitPath;
+    "${RESULT}" ${_stack}/deploy-check-postconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: checkDeletePostconditions profile environment stack client?
+# api: public
+# txt: Checks if the delete postconditions of the stack are met.
+# opt: profile: The profile.
+# opt: environment: The environment.
+# opt: stack: The stack.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the delete postconditions are met; 1/FALSE otherwise.
+# use: if checkDeletePostconditions dev-myclient dev base/network myclient; then
+# use:   echo "Delete postconditions met";
+# use: fi
+function checkDeletePostconditions() {
+  local _profile="${1}";
+  checkNotEmpty profile "${_profile}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  if fileExists "${_stack}/delete-check-postconditions.sh"; then
+    DW.getDryWitPath;
+    "${RESULT}" ${_stack}/delete-check-postconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: runDeployPosthook profile environment stack client?
 # api: public
 # txt: Runs any post-deployment hooks for given stack.
 # opt: profile: The profile.
@@ -226,10 +467,10 @@ function checkPostconditions() {
 # opt: stack: The stack.
 # opt: client: The client. Optional.
 # txt: Returns 0/${TRUE} if the hooks, if any, finish successfully; 1/FALSE otherwise.
-# use: if runPosthook dev-myclient dev base/network myclient; then
-# use:   echo "Post hooks finished successfully";
+# use: if runDeployPosthook dev-myclient dev base/network myclient; then
+# use:   echo "Deploy post hook finished successfully";
 # use: fi
-function runPosthook() {
+function runDeployPosthook() {
   local _profile="${1}";
   checkNotEmpty profile "${_profile}" 1;
   local _environment="${2}";
@@ -239,9 +480,39 @@ function runPosthook() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
-  if fileExists "${_stack}/post-hook.sh"; then
+  if fileExists "${_stack}/deploy-post-hook.sh"; then
     DW.getDryWitPath;
-    "${RESULT}" ${_stack}/post-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    "${RESULT}" ${_stack}/deploy-post-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    _rescode=$?;
+  fi
+
+  return ${_rescode};
+}
+
+# fun: runDeletePosthook profile environment stack client?
+# api: public
+# txt: Runs any post-deletement hooks for given stack.
+# opt: profile: The profile.
+# opt: environment: The environment.
+# opt: stack: The stack.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the hooks, if any, finish successfully; 1/FALSE otherwise.
+# use: if runDeletePosthook dev-myclient dev base/network myclient; then
+# use:   echo "Delete post hook finished successfully";
+# use: fi
+function runDeletePosthook() {
+  local _profile="${1}";
+  checkNotEmpty profile "${_profile}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  if fileExists "${_stack}/delete-post-hook.sh"; then
+    DW.getDryWitPath;
+    "${RESULT}" ${_stack}/delete-post-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -298,9 +569,9 @@ function retrieveDependentStacks() {
   local -i _rescode=${FALSE};
   local _otherStack;
 
-  if fileExists "${_stack}/requirements.yaml"; then
+  if fileExists "${_stack}/requirements.yml"; then
     for _otherStack in $(find . -type d | grep -v -e '^\.$' | sed 's ^\./  g' | grep -v -e "^${_stack}$"); do
-      grep -e "- ${_otherStack}\W*$" "${_stack}/requirements.yaml" > /dev/null;
+      grep -e "- ${_otherStack}\W*$" "${_stack}/requirements.yml" > /dev/null;
       local -i _aux=$?;
       if isTrue ${_aux}; then
         _rescode=${TRUE};
@@ -328,10 +599,11 @@ function retrieveDependentStacks() {
 # opt: stackName: The stack name.
 # opt: stack: The stack name.
 # opt: template: The template file.
+# opt: action: Either create or update.
 # opt: environment: The environment.
 # opt: client: The client. Optional.
 # txt: Returns 0/${TRUE} if the stack gets deployed successfully; 1/${FALSE} otherwise.
-# use: if deployStack "my-profile" "pre-1-my-stack" "my-stack" "stack.json" "pre" "myClient"; then
+# use: if deployStack "my-profile" "pre-1-my-stack" "my-stack" "stack.json" create "pre" "myClient"; then
 # use:   echo "pre-1-my-stack deployed successfully in pre";
 # use: fi
 function deployStack() {
@@ -356,8 +628,6 @@ function deployStack() {
 
   local _timestamp="$(date '+%Y%m%d%H%M%S')";
   local -i _rescode=${FALSE};
-  local _awsProfile;
-  local _parameters;
 
   local _region;
   if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
@@ -367,28 +637,35 @@ function deployStack() {
   fi
 
   if parametersToKeyValuePairs "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
-    _parameters="${RESULT}";
+    local _parameters="${RESULT}";
+    local _escapedParameters="$(echo "${_parameters}" | sed "s |_quote_| ' g")";
+    echo 3
     logTrace "$(which aws) --profile ${_awsProfile} --region ${_region} cloudformation create-stack";
+    echo 4
     logTrace "--stack-name \"${_stackName}\"";
     logTrace "--tags Key=contestia:name,Value=${_stackName} Key=contestia:stack,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}";
     logTrace "--template-body file://${_template}";
-    logTrace "--parameters ${_parameters}";
+    logTrace "--parameters ${_escapedParameters}";
     logTrace "--capabilities CAPABILITY_NAMED_IAM;";
 
     local _output;
-    _output="$($(which aws) --profile "${_awsProfile}" --region ${_region} \
-                 cloudformation ${_action}-stack \
-                 --stack-name "${_stackName}" \
-                 --tags Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag} \
-                 --template-body file://${_template} \
-                 --parameters ${_parameters} \
-                 --capabilities CAPABILITY_NAMED_IAM)";
+    createTempFile;
+    local _tmpFile="${RESULT}";
+    echo 5
+    cat <<EOF > "${_tmpFile}"
+#!/bin/sh
+
+$(which aws) --profile ${_awsProfile} --region ${_region} cloudformation ${_action}-stack --stack-name ${_stackName} --tags Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag} --template-body file://${_template} --parameters ${_escapedParameters} --capabilities CAPABILITY_NAMED_IAM;
+EOF
+    echo 6
+    chmod +x "${_tmpFile}";
+    _output="$(${_tmpFile})";
     _rescode=$?;
   fi
 
   if isTrue ${_rescode}; then
     logTrace "${_output}";
-    waitUntilStackFinishes "${_stack}" "${_stackName}" "${_environment}" "${_client}";
+    waitUntilStackDeploymentFinishes "${_stack}" "${_stackName}" "${_environment}" "${_client}";
     _rescode=$?;
   fi
 
@@ -440,7 +717,7 @@ function isStackCreated() {
 
 # fun: isStackDeployed status
 # api: public
-# txt: Checks whether the stack is already deployed
+# txt: Checks whether the stack is already deployed.
 # opt: status: The stack status.
 # txt: Returns 0/TRUE if the stack is deployed; 1/FALSE otherwise.
 # use: if isStackDeployed ${status}; then
@@ -462,6 +739,31 @@ function isStackDeployed() {
   return ${_rescode};
 
 }
+
+# fun: isStackDeleted status
+# api: public
+# txt: Checks whether the stack is already deleted.
+# opt: status: The stack status.
+# txt: Returns 0/TRUE if the stack is deleted; 1/FALSE otherwise.
+# use: if isStackDeleted ${status}; then
+# use:   echo "Stack deleted";
+# use: fi
+function isStackDeleted() {
+  local _status="${1}";
+  checkNotEmpty status "${_status}" 1;
+
+  local -i _rescode;
+
+  if areEqual "${_status}" DELETE_COMPLETE; then
+    _rescode=${TRUE};
+  else
+    _rescode=${FALSE};
+  fi
+
+  return ${_rescode};
+
+}
+
 # fun: retrieveStackStatus stack environment stackFullName client
 # api: public
 # txt: Retrieves the status of a given stack.
@@ -511,7 +813,7 @@ function retrieveStackStatus() {
   return ${_rescode};
 }
 
-# fun: checkStackStatus stack stackName environment
+# fun: checkStackDeploymentStatus stack stackName environment
 # api: public
 # txt: Checks the status of the stack.
 # opt: stack: The stack.
@@ -520,10 +822,10 @@ function retrieveStackStatus() {
 # opt: client: The client. Optional.
 # txt: Returns 0/${TRUE} if the stack could be checked; 1/${FALSE} otherwise.
 # txt: If the function returns 0/TRUE, the variable RESULT contains the status reported by AWS.
-# use: if checkStackStatus "my-stack" "client-my-stack" "pre" "${CLIENT}"; then
+# use: if checkStackDeploymentStatus "my-stack" "client-my-stack" "pre" "${CLIENT}"; then
 # use:   echo "Stack status -> ${RESULT}";
 # use: fi
-function checkStackStatus() {
+function checkStackDeploymentStatus() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
   local _stackName="${2}";
@@ -533,24 +835,66 @@ function checkStackStatus() {
   local _client="${4}";
   local _result;
 
-  logDebug -n "Retrieving the status of ${_stack} (${_stackName})";
+  logTrace -n "Retrieving the status of ${_stack} (${_stackName})";
 
   if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
     local _result="${RESULT}";
 
     if isStackDeployed "${_result}"; then
-      logDebugResult SUCCESS "${_result}";
+      logTraceResult SUCCESS "${_result}";
     else
-      logDebugResult FAILURE "${_result}";
+      logTraceResult FAILURE "${_result}";
     fi
+    export RESULT="${_result}";
   else
-    logDebugResult FAILURE "missing";
+    logTraceResult FAILURE "missing";
   fi
 
   return ${TRUE};
 }
 
-# fun: waitUntilStackFinishes stack stackName environment
+# fun: checkStackDeletionStatus stack stackName environment
+# api: public
+# txt: Checks the status of the stack.
+# opt: stack: The stack.
+# opt: stackName: The stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the stack could be checked; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the status reported by AWS.
+# use: if checkStackDeletionStatus "my-stack" "client-my-stack" "pre" "${CLIENT}"; then
+# use:   echo "Stack status -> ${RESULT}";
+# use: fi
+function checkStackDeletionStatus() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _environment="${3}";
+  checkNotEmpty environment "${_environment}" 3;
+  local _client="${4}";
+  local _result;
+
+  logTrace -n "Retrieving the status of ${_stack} (${_stackName})";
+
+  if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
+    local _result="${RESULT}";
+
+    if isStackDeleted "${_result}"; then
+      logTraceResult SUCCESS "${_result}";
+    else
+      logTraceResult FAILURE "${_result}";
+    fi
+  else
+    logTraceResult FAILURE "missing";
+  fi
+
+  export RESULT="${_result}";
+
+  return ${TRUE};
+}
+
+# fun: waitUntilStackDeploymentFinishes stack stackName environment
 # api: public
 # txt: Waits until the stack is created or gets rolled back.
 # opt: stack: The stack.
@@ -558,10 +902,10 @@ function checkStackStatus() {
 # opt: environment: The environment.
 # opt: client: The client. Optional.
 # txt: Returns 0/${TRUE} if the stack gets created successfully; 1/${FALSE} otherwise.
-# use: if waitUntilStackFinishes "my-stack" "pre" "${CLIENT}"; then
+# use: if waitUntilStackDeploymentFinishes "my-stack" "pre" "${CLIENT}"; then
 # use:   echo "my-stack has been created successfully in pre";
 # use: fi
-function waitUntilStackFinishes() {
+function waitUntilStackDeploymentFinishes() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
   local _stackName="${2}";
@@ -578,6 +922,59 @@ function waitUntilStackFinishes() {
 
     while ! isStackDeployed "${_status}"; do
       if areEqual "${_status}" ROLLBACK_COMPLETE; then
+        _rescode=${FALSE};
+        break;
+      fi
+      sleep ${STACK_CHECK_INTERVAL};
+      if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
+        _status="${RESULT}";
+        _rescode=${TRUE};
+      else
+        _rescode=${FALSE};
+        break;
+      fi
+    done
+  else
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    logInfoResult SUCCESS "${_status}";
+  else
+    logInfoResult FAILURE "${_status}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: waitUntilStackDeletionFinishes stack stackName environment
+# api: public
+# txt: Waits until the stack is deleted.
+# opt: stack: The stack.
+# opt: stackName: The stack name.
+# opt: environment: The environment.
+# opt: client: The client. Optional.
+# txt: Returns 0/${TRUE} if the stack gets deleted successfully; 1/${FALSE} otherwise.
+# use: if waitUntilStackDeletionFinishes "my-stack" "pre" "${CLIENT}"; then
+# use:   echo "my-stack has been deleted successfully in pre";
+# use: fi
+function waitUntilStackDeletionFinishes() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _environment="${3}";
+  checkNotEmpty environment "${_environment}" 3;
+  local _client="${4}";
+  local -i _rescode=${FALSE};
+  local _status;
+
+  logInfo -n "Waiting for ${_stackName} to be deleted";
+  if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
+    _status="${RESULT}";
+
+    while ! isStackDeleted "${_status}"; do
+      if areEqual "${_status}" DELETE_ROLLBACK_COMPLETE; then
         _rescode=${FALSE};
         break;
       fi
@@ -896,40 +1293,49 @@ function retrieveAwsProfile() {
   local _f;
   local _oldIFS="${IFS}";
 
-  if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
-    local _configFiles="${RESULT}";
-    IFS="${DWIFS}";
-    for _f in ${_configFiles}; do
-      IFS="${_oldIFS}";
-      logTrace -n "Looking for profile information in ${_f}";
-      _result="$(grep -e "^AWS_PROFILE=" "${_f}" | awk -F'=' '{print $2}')";
-      _rescode=$?;
-      if isTrue ${_rescode}; then
-        logTraceResult SUCCESS "${_result}";
-        break;
-      else
-        logTraceResult FAILURE "not found";
-      fi
-    done
-    IFS="${_oldIFS}";
-  fi
+  AWS_DEPLOY.getCachedAwsProfile;
+  local _cachedAwsProfile="${RESULT}";
 
-  if isTrue ${_rescode}; then
-    export RESULT="${_result}";
-  else
-    normalizeUppercase "${_environment}_${_client}";
-    _envUpcased="${RESULT}";
-    logTrace -n "Retrieving the default profile for ${_environment} environment (${_envUpcased}_AWS_PROFILE)";
-    local -n _aux="${_envUpcased}_AWS_PROFILE";
-    _result="${_aux}";
-    if isEmpty "${_result}"; then
-      logTraceResult NEUTRAL "missing";
-      _rescode=${FALSE};
-    else
-      logTraceResult SUCCESS "${_result}";
-      export RESULT="${_result}";
-      _rescode=${TRUE};
+  if isEmpty "${_cachedAwsProfile}"; then
+    if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
+      local _configFiles="${RESULT}";
+      IFS="${DWIFS}";
+      for _f in ${_configFiles}; do
+        IFS="${_oldIFS}";
+        logTrace -n "Looking for profile information in ${_f}";
+        _result="$(grep -e "^AWS_PROFILE=" "${_f}" | awk -F'=' '{print $2}')";
+        _rescode=$?;
+        if isTrue ${_rescode}; then
+          logTraceResult SUCCESS "${_result}";
+          break;
+        else
+          logTraceResult FAILURE "not found";
+        fi
+      done
+      IFS="${_oldIFS}";
     fi
+
+    if isTrue ${_rescode}; then
+      export RESULT="${_result}";
+    else
+      normalizeUppercase "${_environment}_${_client}";
+      _envUpcased="${RESULT}";
+      logTrace -n "Retrieving the default profile for ${_environment} environment (${_envUpcased}_AWS_PROFILE)";
+      local -n _aux="${_envUpcased}_AWS_PROFILE";
+      _result="${_aux}";
+      if isEmpty "${_result}"; then
+        logTraceResult NEUTRAL "missing";
+        _rescode=${FALSE};
+      else
+        logTraceResult SUCCESS "${_result}";
+        export RESULT="${_result}";
+        _rescode=${TRUE};
+      fi
+    fi
+    AWS_DEPLOY.setCachedAwsProfile "${_result}";
+  else
+    export RESULT="${_cachedAwsProfile}";
+    _rescode=${TRUE};
   fi
 
   return ${_rescode};
@@ -957,43 +1363,52 @@ function retrieveAwsRegion() {
   local -i _rescode;
   local _f;
 
-  local _oldIFS="${IFS}";
-  IFS="${DWIFS}";
-  if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
-    local _configFiles="${RESULT}";
-    for _f in ${_configFiles}; do
-      IFS="${_oldIFS}";
-      logTrace -n "Looking for region information in ${_f}";
-      _result="$(grep -e "^AWS_REGION=" "${_f}" | awk -F'=' '{print $2;}')";
-      _rescode=$?;
-      if isTrue ${_rescode}; then
-        logTraceResult SUCCESS "${_result}";
-        break;
-      else
-        logTraceResult FAILURE "not found";
-      fi
-    done
-    IFS="${_oldIFS}";
-  fi
+  AWS_DEPLOY.getCachedAwsRegion;
+  local _cachedAwsRegion="${RESULT}";
 
-  if isTrue ${_rescode}; then
-    export RESULT="${_result}";
-  else
-    normalizeUppercase "${_environment}_${_client}";
-    _envUpcased="${RESULT}";
-    logTrace -n "Retrieving the default region for ${_environment} environment (${_envUpcased}_AWS_REGION)";
-    local -n _aux="${_envUpcased}_AWS_REGION";
-    _result="${_aux}";
-    if isEmpty "${_result}"; then
-      logTraceResult NEUTRAL "missing"
-	    logTrace -n "Using 'eu-west-1' as default region"
-	    export RESULT="eu-west-1";
-      _rescode=${TRUE};
-    else
-      logTraceResult SUCCESS "${_result}";
-      export RESULT="${_result}";
-      _rescode=${TRUE};
+  if isEmpty "${_cachedAwsRegion}"; then
+    local _oldIFS="${IFS}";
+    IFS="${DWIFS}";
+    if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
+      local _configFiles="${RESULT}";
+      for _f in ${_configFiles}; do
+        IFS="${_oldIFS}";
+        logTrace -n "Looking for region information in ${_f}";
+        _result="$(grep -e "^AWS_REGION=" "${_f}" | awk -F'=' '{print $2;}')";
+        _rescode=$?;
+        if isTrue ${_rescode}; then
+          logTraceResult SUCCESS "${_result}";
+          break;
+        else
+          logTraceResult FAILURE "not found";
+        fi
+      done
+      IFS="${_oldIFS}";
     fi
+
+    if isTrue ${_rescode}; then
+      export RESULT="${_result}";
+    else
+      normalizeUppercase "${_environment}_${_client}";
+      _envUpcased="${RESULT}";
+      logTrace -n "Retrieving the default region for ${_environment} environment (${_envUpcased}_AWS_REGION)";
+      local -n _aux="${_envUpcased}_AWS_REGION";
+      _result="${_aux}";
+      if isEmpty "${_result}"; then
+        logTraceResult NEUTRAL "missing"
+	      logTrace -n "Using 'eu-west-1' as default region"
+	      export RESULT="eu-west-1";
+        _rescode=${TRUE};
+      else
+        logTraceResult SUCCESS "${_result}";
+        export RESULT="${_result}";
+        _rescode=${TRUE};
+      fi
+    fi
+    AWS_DEPLOY.setCachedAwsRegion "${_result}";
+  else
+    export RESULT="${_cachedAwsRegion}";
+    _rescode=${TRUE};
   fi
 
   return ${_rescode};
@@ -1022,30 +1437,39 @@ function retrieveConfigFiles() {
   local _oldIFS="${IFS}";
   local _f;
 
-  local _folder="$(basename ${_stack})";
-  IFS="${DWIFS}";
-  for _f in default.config \
-            ${_stack}/${_folder}.config \
-            ${_environment}.config \
-            ${_stack}/${_environment}.config \
-            ${_client}.config \
-            ${_environment}-${_client}.config \
-            ${_stack}/${_client}.config \
-            ${_stack}/${_environment}-${_client}.config; do
-    IFS="${_oldIFS}";
-    logTrace -n "Checking if ${_f} exists";
-    if fileExists "${_f}"; then
-      logTraceResult SUCCESS "present";
-      _rescode=${TRUE};
-      if isNotEmpty "${_result}"; then
-        _result="${_result} ";
+  AWS_DEPLOY.getCachedConfigFiles;
+  local _cachedConfigFiles="${RESULT}";
+
+  if isEmpty "${_cachedConfigFiles}"; then
+    local _folder="$(basename ${_stack})";
+    IFS="${DWIFS}";
+    for _f in default.config \
+                ${_stack}/${_folder}.config \
+                ${_environment}.config \
+                ${_stack}/${_environment}.config \
+                ${_client}.config \
+                ${_environment}-${_client}.config \
+                ${_stack}/${_client}.config \
+                ${_stack}/${_environment}-${_client}.config; do
+      IFS="${_oldIFS}";
+      logTrace -n "Checking if ${_f} exists";
+      if fileExists "${_f}"; then
+        logTraceResult SUCCESS "present";
+        _rescode=${TRUE};
+        if isNotEmpty "${_result}"; then
+          _result="${_result} ";
+        fi
+        _result="${_result}${_f}";
+      else
+        logTraceResult NEUTRAL "missing";
       fi
-      _result="${_result}${_f}";
-    else
-      logTraceResult NEUTRAL "missing";
-    fi
-  done;
-  IFS="${_oldIFS}";
+    done;
+    IFS="${_oldIFS}";
+    AWS_DEPLOY.setCachedConfigFiles "${_result}";
+  else
+    _result="${_cachedConfigFiles}";
+    _rescode=${TRUE};
+  fi
 
   if isTrue ${_rescode}; then
     export RESULT="${_result}";
@@ -1115,7 +1539,7 @@ function parametersToKeyValuePairs() {
   local _auxFile;
   local _f;
 
-  _result="ParameterKey=Environment,ParameterValue=${_environment} ParameterKey=StackName,ParameterValue=${_stackName}";
+  _result="ParameterKey=Environment,ParameterValue=${_environment}";
 #  _result="ParameterKey=StackName,ParameterValue=${_stackName}";
   if retrieveDependentStacks "${_stack}"; then
     local _dependentStacks="${RESULT}";
@@ -1164,7 +1588,7 @@ function parametersToKeyValuePairs() {
       fi
     fi
 
-    _result="${_result} $(cat "${_auxFile}" | grep -v AMI_ID | sort -u | uniq | grep -v -e '^#' | grep -v -e '^\s*$' | grep -v 'AWS_PROFILE' | awk -F'=' '{if (keys[$1] == null || length(keys[$1] == 0)) {print $0;}; keys[$1]=$1;}' | awk -F'=' 'function toCamel(s) { camel = ""; split(s, words, /-|[^a-zA-Z0-9]/); for (i = 1; i in words; i++){camel = camel toupper(substr(words[i], 1, 1)) tolower(substr(words[i], 2)) }; return camel } { gsub(/"/, "", $2); printf(" ParameterKey=%s,ParameterValue=%s", toCamel($1), $2);}')";
+    _result="${_result} $(cat "${_auxFile}" | grep -v AMI_ID | sort -u | uniq | grep -v -e '^#' | grep -v -e '^\s*$' | grep -v 'AWS_PROFILE' | awk -F'=' -v quote="'" '{if (keys[$1] == null || length(keys[$1] == 0)) {print $0;}; keys[$1]=$1;}' | awk -F'=' 'function toCamel(s) { camel = ""; split(s, words, /-|[^a-zA-Z0-9]/); for (i = 1; i in words; i++){camel = camel toupper(substr(words[i], 1, 1)) tolower(substr(words[i], 2)) }; return camel } { gsub(/"/, "", $2); gsub(/^/, quote, $2); gsub(/$/, quote, $2); printf(" ParameterKey=%s,ParameterValue=|_quote_|%s|_quote_|", toCamel($1), $2);}')";
   fi
 
   export RESULT="${_result}";
@@ -1192,9 +1616,10 @@ function retrieveOptimizedAmiId() {
 
   local _result;
 
+  echo 7
   _result="$($(which aws) --profile "${_awsProfile}" ssm get-parameters --names /aws/service/ecs/optimized-ami/${_family}/recommended/image_id --region "${_region}" | jq '. | .Parameters[].Value' | tr -d '"')";
   local -i _rescode=$?;
-
+  echo 8
   if isEmpty "${_result}"; then
     _rescode=${FALSE};
   fi
@@ -1362,9 +1787,9 @@ function deployAll() {
   if retrieveStackChain; then
     local _chain="${RESULT}";
 
-    if retrieveLastFailedStack; then
+    if retrieveLastFailedToDeployStack; then
       local _lastStack="${RESULT}";
-      if retrieveRemainingStacks "${_lastStack}" "${_chain}"; then
+      if retrieveStacksPendingToDeploy "${_lastStack}" "${_chain}"; then
         _chain="${RESULT}";
       fi
     fi
@@ -1381,6 +1806,7 @@ function deployAll() {
           cacheStackAsSuccessfullyDeployed "${_stack}";
         fi
       fi
+      AWS_DEPLOY.defaultState;
     done
     IFS="${_oldIFS}";
   else
@@ -1388,17 +1814,17 @@ function deployAll() {
   fi
 }
 
-# fun: retrieveRemainingStacks stack chain
+# fun: retrieveStacksPendingToDeploy stack chain
 # api: public
 # txt: Retrieves the remaning stacks after the one given, in the chain.
 # opt: stack: The first stack to consider in the chain.
 # opt: chain: The stack chain.
 # txt: Returns 0/TRUE if the stack was in the chain; 1/FALSE otherwise.
 # txt: If the function returns 0/TRUE, the variable RESULT contains the last part of the chain, starting with given stack.
-# use: if retrieveRemainingStacks "permissions" "${CHAIN}"; then
+# use: if retrieveStacksPendingToDeploy "permissions" "${CHAIN}"; then
 # use:   echo "Remaining: ${RESULT}";
 # use: fi
-function retrieveRemainingStacks() {
+function retrieveStacksPendingToDeploy() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
   local _chain="${2}";
@@ -1413,6 +1839,7 @@ function retrieveRemainingStacks() {
   local -i _includeItem=${FALSE};
 
   for _item in ${_chain}; do
+    IFS="${_oldIFS}";
     if areEqual "${_item}" "${_stack}"; then
       _includeItem=${TRUE};
       _rescode=${TRUE};
@@ -1424,6 +1851,7 @@ function retrieveRemainingStacks() {
       _result="${_result}${_item}";
     fi
   done
+  IFS="${_oldIFS}";
 
   if isTrue ${_rescode}; then
     export RESULT="${_result}";
@@ -1432,19 +1860,19 @@ function retrieveRemainingStacks() {
   return ${_rescode};
 }
 
-# fun: retrieveLastFailedStack
+# fun: retrieveLastFailedToDeployStack
 # api: public
-# txt: Retrieves the stack that failed last time.
-# txt: Returns 0/TRUE if the last time any stack failed; 1/FALSE otherwise.
+# txt: Retrieves the last stack that failed to deploy.
+# txt: Returns 0/TRUE if some stack failed to deploy; 1/FALSE otherwise.
 # txt: If the function returs 0/TRUE, the variable RESULT contains the failed stack.
-# use: if retrieveLastFailedStack; then
+# use: if retrieveLastFailedToDeployStack; then
 # use:   echo "Retrying ${RESULT}";
 # use: fi
-function retrieveLastFailedStack() {
+function retrieveLastFailedToDeployStack() {
   local -i _rescode=${FALSE};
   local _result;
 
-  buildLastFailedStackCacheFilename;
+  buildLastFailedToDeployStackCacheFilename;
   local _cacheFile="${RESULT}";
   if fileExists "${_cacheFile}"; then
     _result="$(cat "${_cacheFile}" 2> /dev/null)";
@@ -1462,12 +1890,13 @@ function retrieveLastFailedStack() {
   return ${_rescode};
 }
 
-# fun: cacheStackAsNotDeployed
+# fun: cacheStackAsNotDeployed stack.
 # api: public
 # txt: Writes the name of the last failed stack to disk as cache.
+# opt: stack: The stack name.
 # txt: Returns 0/TRUE if the name of the last failed stack could be cached.
-# use: if cacheStackAsNotDeployed; then
-# use:   echo "stack annotated as not yet deployed";
+# use: if cacheStackAsNotDeployed myStack; then
+# use:   echo "myStack annotated as not yet deployed";
 # use: fi
 function cacheStackAsNotDeployed() {
    local _stack="${1}";
@@ -1475,7 +1904,7 @@ function cacheStackAsNotDeployed() {
 
    local -i _rescode=${FALSE};
 
-   buildLastFailedStackCacheFilename;
+   buildLastFailedToDeployStackCacheFilename;
    local _stackFile="${RESULT}";
    cat <<EOF > "${_stackFile}";
 ${_stack}
@@ -1483,6 +1912,29 @@ EOF
 
    return ${_rescode};
  }
+
+# fun: cacheStackAsNotDeleted stack.
+# api: public
+# txt: Writes the name of the stack last failed to delete to disk as cache.
+# opt: stack: The name of the stack.
+# txt: Returns 0/TRUE if the name of the last failed stack could be cached.
+# use: if cacheStackAsNotDeleted "myStack"; then
+# use:   echo "myStack annotated as not yet deployed";
+# use: fi
+function cacheStackAsNotDeleted() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  local -i _rescode=${FALSE};
+
+  buildLastFailedToDeleteStackCacheFilename;
+  local _stackFile="${RESULT}";
+  cat <<EOF > "${_stackFile}";
+${_stack}
+EOF
+
+  return ${_rescode};
+}
 
 # fun: cacheStackAsSuccessfullyDeployed
 # api: public
@@ -1493,7 +1945,7 @@ function cacheStackAsSuccessfullyDeployed() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
 
-  buildLastFailedStackCacheFilename;
+  buildLastFailedToDeployStackCacheFilename;
   local _stackFile="${RESULT}";
   if cat "${_stackFile}" 2> /dev/null | grep "${_stack}" > /dev/null; then
     echo -n '' > "${_stackFile}";
@@ -1502,18 +1954,170 @@ function cacheStackAsSuccessfullyDeployed() {
   return ${TRUE};
 }
 
-# fun: buildLastFailedStackCacheFilename
+# fun: cacheStackAsSuccessfullyDeleted
 # api: public
-# txt: Builds the filename of the last failed stack cache.
+# txt: Ensures given stack is annotated as deleted in the cache.
+# txt: Returns 0/TRUE always.
+# use: cacheStackAsSuccessfullyDeleted "permissions";
+function cacheStackAsSuccessfullyDeleted() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+
+  buildLastFailedToDeleteStackCacheFilename;
+  local _stackFile="${RESULT}";
+  if cat "${_stackFile}" 2> /dev/null | grep "${_stack}" > /dev/null; then
+    echo -n '' > "${_stackFile}";
+  fi
+
+  return ${TRUE};
+}
+
+# fun: buildLastFailedToDeployStackCacheFilename
+# api: public
+# txt: Builds the filename of the last failed to deploy stack cache.
 # txt: Returns 0/TRUE always.
 # txt: The variable RESULT contains the filename.
-# use: buildLastFailedStackCacheFilename;
+# use: buildLastFailedToDeployStackCacheFilename;
 # use: echo "Last failed stack cache file: ${RESULT}";
-function buildLastFailedStackCacheFilename() {
-  DW.getScriptName;
-  local _scriptName="${RESULT}";
-  removePrefix "${_scriptName}" "./";
-  export RESULT=".${RESULT}.last-failed-stack-${ENVIRONMENT}-${CLIENT}";
+function buildLastFailedToDeployStackCacheFilename() {
+  export RESULT=".last-failed-to-deploy-stack-${ENVIRONMENT}-${CLIENT}";
+}
+
+# fun: deleteAll
+# api: public
+# txt: Manages the deployment of all stacks as a whole.
+# txt: Returns 0/TRUE always. In case of error, it exits.
+# use: deployAll;
+function deleteAll() {
+  local _stack;
+
+  local _oldIFS="${IFS}";
+  local _file;
+  IFS="${DWIFS}";
+  for _file in .deploy-stack.inc.sh \
+               .deploy-stack.inc.sh.${CLIENT}-${ENVIRONMENT} \
+               .deploy-all.inc.sh.${CLIENT}-${ENVIRONMENT}; do
+    IFS="${_oldIFS}";
+    if fileExists "${_file}"; then
+      source "${_file}";
+    fi
+  done
+  IFS="${_oldIFS}";
+
+  if retrieveStackChain; then
+    local _chain="${RESULT}";
+
+    if retrieveLastFailedToDeleteStack; then
+      local _lastStack="${RESULT}";
+      if retrieveStacksPendingToDelete "${_lastStack}" "${_chain}"; then
+        _chain="$(echo ${RESULT} | tr -s ' ' '\n' | tac)";
+      fi
+    fi
+
+    IFS="${DWIFS}";
+    for _stack in $(echo ${_chain} | tr -s ' ' '\n' | tac); do
+      IFS="${_oldIFS}";
+      if isStackDeleted "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
+        logInfo -n "${_stack}";
+        logInfoResult NEUTRAL "deleted";
+      else
+        cacheStackAsNotDeleted "${_stack}";
+        if deleteStack "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
+          cacheStackAsSuccessfullyDeleted "${_stack}";
+        fi
+      fi
+    done
+    IFS="${_oldIFS}";
+  else
+    exitWithErrorCode CANNOT_RETRIEVE_THE_STACK_CHAIN;
+  fi
+}
+
+# fun: retrieveStacksPendingToDelete stack chain
+# api: public
+# txt: Retrieves the remaning stacks pending to delete, after the one given, in the chain, in reverse order.
+# opt: stack: The first stack to consider in the chain.
+# opt: chain: The stack chain.
+# txt: Returns 0/TRUE if the stack was in the chain; 1/FALSE otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the last part of the chain, starting with given stack.
+# use: if retrieveStacksPendingForDeletion "permissions" "${CHAIN}"; then
+# use:   echo "Remaining: ${RESULT}";
+# use: fi
+function retrieveStacksPendingToDelete() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _chain="${2}";
+  checkNotEmpty chain "${_chain}" 2;
+
+  local -i _rescode=${FALSE};
+  local _result;
+
+  local _oldIFS="${IFS}";
+  IFS="${DWIFS}";
+  local _item;
+  local -i _includeItem=${FALSE};
+
+  for _item in $(echo ${_chain} | tr -s ' ' '\n' | tac); do
+    IFS="${_oldIFS}";
+    if areEqual "${_item}" "${_stack}"; then
+      _includeItem=${TRUE};
+      _rescode=${TRUE};
+    fi
+    if isTrue ${_includeItem}; then
+      if isNotEmpty "${_result}"; then
+        _result="${_result} ";
+      fi
+      _result="${_result}${_item}";
+    fi
+  done
+  IFS="${_oldIFS}";
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveLastFailedToDeleteStack
+# api: public
+# txt: Retrieves the last stack that failed to delete.
+# txt: Returns 0/TRUE if some stack failed to delete; 1/FALSE otherwise.
+# txt: If the function returs 0/TRUE, the variable RESULT contains the failed stack.
+# use: if retrieveLastFailedToDeleteStack; then
+# use:   echo "Retrying ${RESULT}";
+# use: fi
+function retrieveLastFailedToDeleteStack() {
+  local -i _rescode=${FALSE};
+  local _result;
+
+  buildLastFailedToDeleteStackCacheFilename;
+  local _cacheFile="${RESULT}";
+  if fileExists "${_cacheFile}"; then
+    _result="$(cat "${_cacheFile}" 2> /dev/null)";
+    _rescode=$?;
+  fi
+
+  if isEmpty "${_result}"; then
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: buildLastFailedToDeleteStackCacheFilename
+# api: public
+# txt: Builds the filename of the last failed to delete stack cache.
+# txt: Returns 0/TRUE always.
+# txt: The variable RESULT contains the filename.
+# use: buildLastFailedToDeleteStackCacheFilename;
+# use: echo "Last failed stack cache file: ${RESULT}";
+function buildLastFailedToDeleteStackCacheFilename() {
+  export RESULT=".last-failed-to-delete-stack-${ENVIRONMENT}-${CLIENT}";
 }
 
 # fun: retrieveCategories
@@ -1528,21 +2132,30 @@ function retrieveCategories() {
   local -i _rescode=${FALSE};
   local _result;
 
-  local _potentialCategories="$(find . -name 'index' | sed 's ^./  g' | grep -v -e '^\..*$' | sort | sed 's /index$  g')";
-  local _potentialCategory;
-  local _oldIFS="${IFS}";
-  IFS="${DWIFS}";
-  for _potentialCategory in ${_potentialCategories}; do
-    IFS="${_oldIFS}";
-    if retrieveStacksInCategory "${_potentialCategory}"; then
-      _rescode=${TRUE};
-      if isNotEmpty "${_result}"; then
-        _result="${_result} ";
+  AWS_DEPLOY.getCachedCategories;
+  local _cachedCategories="${RESULT}";
+
+  if isEmpty "${_cachedCategories}"; then
+    local _potentialCategories="$(find . -name 'index' | sed 's ^./  g' | grep -v -e '^\..*$' | sort | sed 's /index$  g')";
+    local _potentialCategory;
+    local _oldIFS="${IFS}";
+    IFS="${DWIFS}";
+    for _potentialCategory in ${_potentialCategories}; do
+      IFS="${_oldIFS}";
+      if retrieveStacksInCategory "${_potentialCategory}"; then
+        _rescode=${TRUE};
+        if isNotEmpty "${_result}"; then
+          _result="${_result} ";
+        fi
+        _result="${_result}${_potentialCategory}";
       fi
-      _result="${_result}${_potentialCategory}";
-    fi
-  done
-  IFS="${_oldIFS}";
+    done
+    IFS="${_oldIFS}";
+    AWS_DEPLOY.setCachedCategories "${_result}";
+  else
+    _result="${_cachedCategories}";
+    _rescode=${TRUE};
+  fi
 
   if isTrue ${_rescode}; then
     export RESULT="${_result}";
@@ -1589,10 +2202,137 @@ function retrieveCachedStackChain() {
 # use: buildStackChainCacheFilename;
 # use: echo "Cache file: ${RESULT}";
 function buildStackChainCacheFilename() {
-  DW.getScriptName;
-  local _scriptName="${RESULT}";
-  removePrefix "${_scriptName}" "./";
-  export RESULT=".${RESULT}.stack-chain-${ENVIRONMENT}-${CLIENT}";
+  export RESULT=".stack-chain-${ENVIRONMENT}-${CLIENT}";
+}
+
+# fun: AWS_DEPLOY.getCachedConfigFiles
+# api: private
+# txt: Retrieves the cached version of the config files.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.getCachedConfigFiles;
+# use: local configFiles=${RESULT};
+function AWS_DEPLOY.getCachedConfigFiles() {
+  AWS_DEPLOY.getModuleName;
+  DW.getGlobalString "${RESULT}" CACHED_CONFIG_FILES;
+}
+
+# fun: AWS_DEPLOY.setCachedConfigFiles files
+# api: private
+# txt: Annotates the cached version of the config files.
+# txt: files: The value to cache.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.setCachedConfigFiles "${files}";
+function AWS_DEPLOY.setCachedConfigFiles() {
+  local _files="${1}";
+
+  AWS_DEPLOY.getModuleName;
+  DW.setGlobalString "${RESULT}" CACHED_CONFIG_FILES "${_files}";
+}
+
+# fun: AWS_DEPLOY.getCachedCategories
+# api: private
+# txt: Retrieves the cached version of the categories.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.getCachedCategories;
+# use: local configFiles=${RESULT};
+function AWS_DEPLOY.getCachedCategories() {
+  AWS_DEPLOY.getModuleName;
+  DW.getGlobalString "${RESULT}" CACHED_CATEGORIES;
+}
+
+# fun: AWS_DEPLOY.setCachedCategories categories
+# api: private
+# txt: Annotates the cached version of the categories.
+# txt: categories: The value to cache.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.setCachedCategories "${categories}";
+function AWS_DEPLOY.setCachedCategories() {
+  local _files="${1}";
+
+  AWS_DEPLOY.getModuleName;
+  DW.setGlobalString "${RESULT}" CACHED_CATEGORIES "${_files}";
+}
+
+# fun: AWS_DEPLOY.getCachedAwsRegion
+# api: private
+# txt: Retrieves the cached version of the AWS region.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.getCachedAwsRegion;
+# use: local awsRegion=${RESULT};
+function AWS_DEPLOY.getCachedAwsRegion() {
+  AWS_DEPLOY.getModuleName;
+  DW.getGlobalString "${RESULT}" CACHED_AWS_REGION;
+}
+
+# fun: AWS_DEPLOY.setCachedAwsRegion region
+# api: private
+# txt: Annotates the cached version of the AWS region.
+# txt: region: The value to cache.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.setCachedAwsRegion "${region}";
+function AWS_DEPLOY.setCachedAwsRegion() {
+  local _region="${1}";
+
+  AWS_DEPLOY.getModuleName;
+  DW.setGlobalString "${RESULT}" CACHED_AWS_REGION "${_region}";
+}
+
+# fun: AWS_DEPLOY.getCachedAwsProfile
+# api: private
+# txt: Retrieves the cached version of the AWS profile.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.getCachedAwsProfile;
+# use: local awsProfile=${RESULT};
+function AWS_DEPLOY.getCachedAwsProfile() {
+  AWS_DEPLOY.getModuleName;
+  DW.getGlobalString "${RESULT}" CACHED_AWS_PROFILE;
+}
+
+# fun: AWS_DEPLOY.setCachedAwsProfile profile
+# api: private
+# txt: Annotates the cached version of the AWS profile.
+# txt: profile: The value to cache.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.setCachedAwsProfile "${profile}";
+function AWS_DEPLOY.setCachedAwsProfile() {
+  local _profile="${1}";
+
+  AWS_DEPLOY.getModuleName;
+  DW.setGlobalString "${RESULT}" CACHED_AWS_PROFILE "${_profile}";
+}
+
+# fun: AWS_DEPLOY.defaultState
+# api: private
+# txt: Resets the module state.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.defaultState
+function AWS_DEPLOY.defaultState() {
+  AWS_DEPLOY.setCachedConfigFiles "";
+  AWS_DEPLOY.setCachedCategories "";
+  AWS_DEPLOY.setCachedAwsRegion "";
+  AWS_DEPLOY.setCachedAwsProfile "";
+}
+
+# fun: AWS_DEPLOY.resetState
+# api: private
+# txt: Resets the module state.
+# txt: Returns 0/TRUE always.
+# use: AWS_DEPLOY.resetState
+function AWS_DEPLOY.resetState() {
+  AWS_DEPLOY.getModuleName;
+  local _moduleName="${RESULT}";
+
+  # env: CACHED_CONFIG_FILES: The cached config files.
+  DW.declareGlobalString "${_moduleName}" CACHED_CONFIG_FILES;
+
+  # env: CACHED_CATEGORIES: The cached categories.
+  DW.declareGlobalString "${_moduleName}" CACHED_CATEGORIES;
+
+  # env: CACHED_AWS_REGION: The cached AWS region.
+  DW.declareGlobalString "${_moduleName}" CACHED_AWS_REGION;
+
+  # env: CACHED_AWS_REGION: The cached AWS profile.
+  DW.declareGlobalString "${_moduleName}" CACHED_AWS_PROFILE;
 }
 
 # errors
@@ -1602,12 +2342,17 @@ addError MISSING_STACK_SETTINGS ".config file not found for stack";
 addError MISSING_TEMPLATE_FILE "template file not found";
 addError MISSING_STACK_INDEX "Missing index for stack ";
 addError ERROR_DEPLOYING_STACK "Error deploying stack";
+addError ERROR_DELETING_STACK "Error deleting stack";
 addError CANNOT_MINIFY_TEMPLATE "Error minifying template";
 addError ERROR_CHECKING_STACK_STATUS "Error checking the status of stack";
-addError PRECONDITIONS_NOT_MET "Preconditions not met in stack";
-addError PREHOOK_FAILED "pre-hook.sh failed";
-addError POSTCONDITIONS_NOT_MET "Postconditions not met in stack";
-addError POSTHOOK_FAILED "post-hook.sh failed";
+addError DEPLOY_PRECONDITIONS_NOT_MET "Deploy preconditions not met in stack";
+addError DEPLOY_PREHOOK_FAILED "deploy-pre-hook.sh failed";
+addError DEPLOY_POSTCONDITIONS_NOT_MET "Deploy postconditions not met in stack";
+addError DEPLOY_POSTHOOK_FAILED "deploy-post-hook.sh failed";
+addError DELETE_PRECONDITIONS_NOT_MET "Delete preconditions not met in stack";
+addError DELETE_PREHOOK_FAILED "delete-pre-hook.sh failed";
+addError DELETE_POSTCONDITIONS_NOT_MET "Delete postconditions not met in stack";
+addError DELETE_POSTHOOK_FAILED "delete-post-hook.sh failed";
 
 # environment variables
 defineEnvVar GIT_COMMIT OPTIONAL "The git commit used when deploying stacks" "b12c68a";
@@ -1617,4 +2362,5 @@ defineEnvVar OMIT_STACKS OPTIONAL "The comma-separated values of stacks to omit"
 defineEnvVar STACK_CHECK_INTERVAL OPTIONAL "How often to check for the template deployment to finish" "10s";
 defineEnvVar DEFAULT_AWS_PROFILE OPTIONAL "The aws profile" "contestia-devops";
 defineEnvVar ECS_TASK_AMBASSADOR_IMAGE OPTIONAL "The ECS-TASK-Lite image" "406021078145.dkr.ecr.eu-west-1.amazonaws.com/ecs-task-kite:latest";
+
 # vim: syntax=sh ts=2 sw=2 sts=4 sr noet
