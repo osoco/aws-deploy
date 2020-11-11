@@ -23,9 +23,4 @@ setScriptUrl "https://github.com/osoco/aws-deploy";
 addCommandLineParameter action "Either create or update" MANDATORY SINGLE;
 addCommandLineParameter environment "The environment where the stack is or will be deployed. For environment-wide settings, define them in a file [environment].config in the root folder" MANDATORY SINGLE;
 addCommandLineParameter client "The specific client" OPTIONAL SINGLE;
-
-# errors
-addError DEPLOY_STACK_NOT_INSTALLED "deploy-stack.sh is not installed";
-
-checkReq "./deploy-stack.sh" DEPLOY_STACK_NOT_INSTALLED;
 # vim: syntax=sh ts=2 sw=2 sts=4 sr noet
