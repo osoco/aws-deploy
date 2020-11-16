@@ -265,8 +265,7 @@ function checkDeployPreconditions() {
   local -i _rescode=${TRUE};
 
   if fileExists "${_stack}/deploy-check-preconditions.sh"; then
-    DW.getDryWitPath;
-    "${RESULT}" ${_stack}/deploy-check-preconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    ${_stack}/deploy-check-preconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -297,8 +296,7 @@ function checkDeletePreconditions() {
   local -i _rescode=${TRUE};
 
   if fileExists "${_stack}/delete-check-preconditions.sh"; then
-    DW.getDryWitPath;
-    "${RESULT}" ${_stack}/delete-check-preconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    ${_stack}/delete-check-preconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -326,9 +324,10 @@ function runDeployPrehook() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
+  local -i _rescode=${TRUE};
+
   if fileExists "${_stack}/deploy-pre-hook.sh"; then
-    DW.getDryWitPath;
-    "${RESULT}" ${_stack}/deploy-pre-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    ${_stack}/deploy-pre-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -356,9 +355,10 @@ function runDeletePrehook() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
+  local -i _rescode=${TRUE};
+
   if fileExists "${_stack}/delete-pre-hook.sh"; then
-    DW.getDryWitPath;
-    "${RESULT}" ${_stack}/delete-pre-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    ${_stack}/delete-pre-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -416,9 +416,10 @@ function checkDeployPostconditions() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
+  local -i _rescode=${TRUE};
+
   if fileExists "${_stack}/deploy-check-postconditions.sh"; then
-    DW.getDryWitPath;
-    "${RESULT}" ${_stack}/deploy-check-postconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    ${_stack}/deploy-check-postconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -446,9 +447,10 @@ function checkDeletePostconditions() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
+  local -i _rescode=${TRUE};
+
   if fileExists "${_stack}/delete-check-postconditions.sh"; then
-    DW.getDryWitPath;
-    "${RESULT}" ${_stack}/delete-check-postconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    ${_stack}/delete-check-postconditions.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -476,9 +478,10 @@ function runDeployPosthook() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
+  local -i _rescode=${TRUE};
+
   if fileExists "${_stack}/deploy-post-hook.sh"; then
-    DW.getDryWitPath;
-    "${RESULT}" ${_stack}/deploy-post-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    ${_stack}/deploy-post-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -506,9 +509,10 @@ function runDeletePosthook() {
   local _client="${4}";
   checkNotEmpty client "${_client}" 4;
 
+  local -i _rescode=${TRUE};
+
   if fileExists "${_stack}/delete-post-hook.sh"; then
-    DW.getDryWitPath;
-    "${RESULT}" ${_stack}/delete-post-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
+    ${_stack}/delete-post-hook.sh -p "${_profile}" -e "${_environment}" -c "${_client}";
     _rescode=$?;
   fi
 
@@ -639,7 +643,7 @@ function deployStack() {
                        "${_stackName}" \
                        "${_region}" \
                        "${_template}" \
-                       "Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}" \
+                       "Key=Name,Value=${_stackName} Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}" \
                        "${_escapedParameters}";
     _rescode=$?;
   fi
@@ -863,14 +867,15 @@ function checkStackDeletionStatus() {
 
     if isStackDeleted "${_result}"; then
       logTraceResult SUCCESS "${_result}";
+      export RESULT="${_result}";
     else
       logTraceResult FAILURE "${_result}";
+      export ERROR="${_result}";
     fi
   else
-    logTraceResult FAILURE "missing";
+    logTraceResult NEUTRAL "missing";
+    export RESULT="deleted";
   fi
-
-  export RESULT="${_result}";
 
   return ${TRUE};
 }
@@ -947,7 +952,7 @@ function waitUntilStackDeletionFinishes() {
   local _environment="${3}";
   checkNotEmpty environment "${_environment}" 3;
   local _client="${4}";
-  local -i _rescode=${FALSE};
+  local -i _rescode=${TRUE};
   local _status;
 
   logInfo -n "Waiting for ${_stackName} to be deleted";
@@ -968,12 +973,10 @@ function waitUntilStackDeletionFinishes() {
         break;
       fi
     done
-  else
-    _rescode=${FALSE};
   fi
 
   if isTrue ${_rescode}; then
-    logInfoResult SUCCESS "${_status}";
+    logInfoResult SUCCESS "${_status:-deleted}";
   else
     logInfoResult FAILURE "${_status}";
   fi
@@ -1781,7 +1784,7 @@ function deployAll() {
         logInfo -n "${_stack}";
         logInfoResult NEUTRAL "deployed";
       else
-        cacheStackAsNotDeployed "${_stack}";
+        cacheStackAsFailed "${_stack}";
         if createOrUpdateStack "${_stack}" "${ACTION}" "${ENVIRONMENT}" "${CLIENT}"; then
           cacheStackAsSuccessfullyDeployed "${_stack}";
         fi
@@ -1852,7 +1855,7 @@ function retrieveLastFailedToDeployStack() {
   local -i _rescode=${FALSE};
   local _result;
 
-  buildLastFailedToDeployStackCacheFilename;
+  buildLastFailedStackCacheFilename;
   local _cacheFile="${RESULT}";
   if fileExists "${_cacheFile}"; then
     _result="$(cat "${_cacheFile}" 2> /dev/null)";
@@ -1870,21 +1873,21 @@ function retrieveLastFailedToDeployStack() {
   return ${_rescode};
 }
 
-# fun: cacheStackAsNotDeployed stack.
+# fun: cacheStackAsFailed stack.
 # api: public
 # txt: Writes the name of the last failed stack to disk as cache.
 # opt: stack: The stack name.
 # txt: Returns 0/TRUE if the name of the last failed stack could be cached.
-# use: if cacheStackAsNotDeployed myStack; then
-# use:   echo "myStack annotated as not yet deployed";
+# use: if cacheStackAsFailed myStack; then
+# use:   echo "myStack annotated as failed";
 # use: fi
-function cacheStackAsNotDeployed() {
+function cacheStackAsFailed() {
    local _stack="${1}";
    checkNotEmpty stack "${_stack}" 1;
 
    local -i _rescode=${FALSE};
 
-   buildLastFailedToDeployStackCacheFilename;
+   buildLastFailedStackCacheFilename;
    local _stackFile="${RESULT}";
    cat <<EOF > "${_stackFile}";
 ${_stack}
@@ -1892,29 +1895,6 @@ EOF
 
    return ${_rescode};
  }
-
-# fun: cacheStackAsNotDeleted stack.
-# api: public
-# txt: Writes the name of the stack last failed to delete to disk as cache.
-# opt: stack: The name of the stack.
-# txt: Returns 0/TRUE if the name of the last failed stack could be cached.
-# use: if cacheStackAsNotDeleted "myStack"; then
-# use:   echo "myStack annotated as not yet deployed";
-# use: fi
-function cacheStackAsNotDeleted() {
-  local _stack="${1}";
-  checkNotEmpty stack "${_stack}" 1;
-
-  local -i _rescode=${FALSE};
-
-  buildLastFailedToDeleteStackCacheFilename;
-  local _stackFile="${RESULT}";
-  cat <<EOF > "${_stackFile}";
-${_stack}
-EOF
-
-  return ${_rescode};
-}
 
 # fun: cacheStackAsSuccessfullyDeployed
 # api: public
@@ -1925,7 +1905,7 @@ function cacheStackAsSuccessfullyDeployed() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
 
-  buildLastFailedToDeployStackCacheFilename;
+  buildLastFailedStackCacheFilename;
   local _stackFile="${RESULT}";
   if cat "${_stackFile}" 2> /dev/null | grep "${_stack}" > /dev/null; then
     echo -n '' > "${_stackFile}";
@@ -1943,24 +1923,13 @@ function cacheStackAsSuccessfullyDeleted() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
 
-  buildLastFailedToDeleteStackCacheFilename;
+  buildLastFailedStackCacheFilename;
   local _stackFile="${RESULT}";
   if cat "${_stackFile}" 2> /dev/null | grep "${_stack}" > /dev/null; then
     echo -n '' > "${_stackFile}";
   fi
 
   return ${TRUE};
-}
-
-# fun: buildLastFailedToDeployStackCacheFilename
-# api: public
-# txt: Builds the filename of the last failed to deploy stack cache.
-# txt: Returns 0/TRUE always.
-# txt: The variable RESULT contains the filename.
-# use: buildLastFailedToDeployStackCacheFilename;
-# use: echo "Last failed stack cache file: ${RESULT}";
-function buildLastFailedToDeployStackCacheFilename() {
-  export RESULT=".last-failed-to-deploy-stack-${ENVIRONMENT}-${CLIENT}";
 }
 
 # fun: deleteAll
@@ -1997,14 +1966,10 @@ function deleteAll() {
     IFS="${DWIFS}";
     for _stack in $(echo ${_chain} | tr -s ' ' '\n' | tac); do
       IFS="${_oldIFS}";
-      if isStackDeleted "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
-        logInfo -n "${_stack}";
-        logInfoResult NEUTRAL "deleted";
+      if deleteStack "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
+        cacheStackAsSuccessfullyDeleted "${_stack}";
       else
-        cacheStackAsNotDeleted "${_stack}";
-        if deleteStack "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
-          cacheStackAsSuccessfullyDeleted "${_stack}";
-        fi
+        cacheStackAsFailed "${_stack}";
       fi
     done
     IFS="${_oldIFS}";
@@ -2071,7 +2036,7 @@ function retrieveLastFailedToDeleteStack() {
   local -i _rescode=${FALSE};
   local _result;
 
-  buildLastFailedToDeleteStackCacheFilename;
+  buildLastFailedStackCacheFilename;
   local _cacheFile="${RESULT}";
   if fileExists "${_cacheFile}"; then
     _result="$(cat "${_cacheFile}" 2> /dev/null)";
@@ -2089,15 +2054,15 @@ function retrieveLastFailedToDeleteStack() {
   return ${_rescode};
 }
 
-# fun: buildLastFailedToDeleteStackCacheFilename
+# fun: buildLastFailedStackCacheFilename
 # api: public
-# txt: Builds the filename of the last failed to delete stack cache.
+# txt: Builds the filename of the last failed stack.
 # txt: Returns 0/TRUE always.
 # txt: The variable RESULT contains the filename.
-# use: buildLastFailedToDeleteStackCacheFilename;
+# use: buildLastFailedStackCacheFilename;
 # use: echo "Last failed stack cache file: ${RESULT}";
-function buildLastFailedToDeleteStackCacheFilename() {
-  export RESULT=".last-failed-to-delete-stack-${ENVIRONMENT}-${CLIENT}";
+function buildLastFailedStackCacheFilename() {
+  export RESULT=".last-failed-stack-${ENVIRONMENT}-${CLIENT}";
 }
 
 # fun: retrieveCategories
@@ -2316,6 +2281,7 @@ function AWS_DEPLOY.resetState() {
 }
 
 # errors
+addError CANNOT_USE_AWS_CLI "Error using AWS CLI. Is the AWS profile (depends on the environment and client) correct?";
 addError STACK_FOLDER_DOES_NOT_EXIST "stack folder not found";
 addError INVALID_CLOUDFORMATION_TEMPLATE "Invalid CloudFormation template";
 addError MISSING_STACK_SETTINGS ".config file not found for stack";
