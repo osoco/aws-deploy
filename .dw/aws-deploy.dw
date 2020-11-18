@@ -25,10 +25,11 @@ function AWS_DEPLOY.getModuleName() {
 # opt: stack: The stack.
 # opt: action: The action.
 # opt: environment: The environment.
+# opt: readIncFiles: Whether to read the .inc files. Optional. Defaults to ${TRUE}.
 # opt: client: The client (optional).
 # txt: Returns 0/${TRUE} if the stack gets created successfully; 1/${FALSE} otherwise.
-# use: if createOrUpdateStack "network" "create" "pre" "myClient"; then
-# use:   echo "Stack network, in environment 'pre', for client' myClient', has been created successfully.";
+# use: if createOrUpdateStack "base/network" create "pre" ${TRUE} "myClient"; then
+# use:   echo "Stack base/network, in environment 'pre', for client' myClient', has been created successfully.";
 # use: fi
 function createOrUpdateStack() {
   local _stack="${1}";
@@ -37,7 +38,15 @@ function createOrUpdateStack() {
   checkNotEmpty action "${_action}" 2;
   local _environment="${3}";
   checkNotEmpty environment "${_environment}" 3;
-  local _client="${4}";
+  local _readIncFiles="${4}";
+  if isEmpty "${_readIncFiles}"; then
+    _readIncFiles=${TRUE};
+  fi
+  local _client="${5}";
+
+  if isTrue "${_readIncFiles}"; then
+    readIncFiles "${_environment}" "${_client}";
+  fi
 
   if ! readSettings "${_stack}" "${_environment}" "${_client}"; then
     exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
@@ -57,7 +66,7 @@ function createOrUpdateStack() {
     fi
 
     local _status="${RESULT}";
-    if ! isStackDeployed "${_status}"; then
+    if areEqual "${_action}" update || ! isStackDeployed "${_status}"; then
       retrieveAwsProfile "${_stack}" "${_environment}" "${_client}";
       local _awsProfile="${RESULT}";
 
@@ -100,6 +109,44 @@ function createOrUpdateStack() {
   fi
 }
 
+# fun: readIncFiles environment? client?
+# api: public
+# txt: Reads / sources the inc files.
+# opt: environment: The environment. Optional.
+# opt: client: The client. Optional.
+# txt: Returns 0/TRUE if at least one inc file could be read.
+# use: if readIncFiles staging; then
+# use:   echo "Inc files read successfully";
+# use: fi
+function readIncFiles() {
+  local _environment="${1}";
+  local _client="${2}";
+
+  local _incFiles=( .aws-deploy.inc.sh );
+  if isNotEmpty "${_client}"; then
+    _incFiles+=( .aws-deploy.inc.sh.${_client} );
+  fi
+
+  if isNotEmpty "${_environment}"; then
+    _incFiles+=( .aws-deploy.inc.sh.${_environment} );
+  fi
+
+  if isNotEmpty "${_environment}" && isNotEmpty "${_client}"; then
+    _incFiles+=( .aws-deploy.inc.sh.${_client}-${_environment} );
+  fi
+
+  local _oldIFS="${IFS}";
+  local _file;
+  IFS="${DWIFS}";
+  for _file in ${_incFiles[@]}; do
+    IFS="${_oldIFS}";
+    if fileExists "${_file}"; then
+      source "${_file}";
+    fi
+  done
+  IFS="${_oldIFS}";
+}
+
 # fun: deleteStack stack environment client
 # api: public
 # txt: Deletes a stack.
@@ -115,7 +162,15 @@ function deleteStack() {
   checkNotEmpty stack "${_stack}" 1;
   local _environment="${2}";
   checkNotEmpty environment "${_environment}" 2;
-  local _client="${3}";
+  local _readIncFiles="${3}";
+  if isEmpty "${_readIncFiles}"; then
+    _readIncFiles=${TRUE};
+  fi
+  local _client="${4}";
+
+  if isTrue "${_readIncFiles}"; then
+    readIncFiles "${_environment}" "${_client}";
+  fi
 
   if ! readSettings "${_stack}" "${_environment}" "${_client}"; then
     exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
@@ -199,13 +254,16 @@ function awsDeleteStack() {
     _region="eu-west-1";
   fi
 
+  logInfo -n "Requesting the deletion of ${_stackName} in ${_region}";
   requestDeleteStack "${_awsProfile}" "${_stackName}" "${_region}";
   local -i _rescode=$?;
 
   if isTrue ${_rescode}; then
-    logTrace "${_output}";
+    logDebugResult SUCCESS "done";
     waitUntilStackDeletionFinishes "${_stack}" "${_stackName}" "${_environment}" "${_client}";
     _rescode=$?;
+  else
+    logDebugResult FAILURE "failed";
   fi
 
   return ${_rescode};
@@ -639,17 +697,17 @@ function deployStack() {
   if parametersToKeyValuePairs "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
     local _parameters="${RESULT}";
     local _escapedParameters="$(echo "${_parameters}" | sed "s |_quote_| ' g")";
-    requestCreateStack "${_awsProfile}" \
-                       "${_stackName}" \
-                       "${_region}" \
-                       "${_template}" \
-                       "Key=Name,Value=${_stackName} Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}" \
-                       "${_escapedParameters}";
+    requestCreateOrUpdateStack "${_action}" \
+                               "${_awsProfile}" \
+                               "${_stackName}" \
+                               "${_region}" \
+                               "${_template}" \
+                               "Key=Name,Value=${_stackName} Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}" \
+                               "${_escapedParameters}";
     _rescode=$?;
   fi
 
   if isTrue ${_rescode}; then
-    logTrace "${_output}";
     waitUntilStackDeploymentFinishes "${_stack}" "${_stackName}" "${_environment}" "${_client}";
     _rescode=$?;
   fi
@@ -925,9 +983,9 @@ function waitUntilStackDeploymentFinishes() {
   fi
 
   if isTrue ${_rescode}; then
-    logInfoResult SUCCESS "${_status}";
+    logInfoResult SUCCESS "${_status:-unknown}";
   else
-    logInfoResult FAILURE "${_status}";
+    logInfoResult FAILURE "${_status:-unknown}";
   fi
 
   return ${_rescode};
@@ -1047,8 +1105,8 @@ function retrieveTemplateFile() {
   local _folder="$(basename ${_stack})";
   _result="${_stack}/${_folder}.json";
   if fileExists "${_result}"; then
-    if minify_json_file "${_result}"; then
-      # RESULT is already exported by minify_json_file
+    if minifyJsonFile "${_result}"; then
+      # RESULT is already exported by minifyJsonFile
       _rescode=${TRUE};
     else
       exitWithErrorCode CANNOT_MINIFY_TEMPLATE "${_result}";
@@ -1060,18 +1118,18 @@ function retrieveTemplateFile() {
   return ${_rescode};
 }
 
-# fun: minify_json_file input
+# fun: minifyJsonFile input
 # api: public
 # txt: Minifies given JSON file.
 # opt: input: The JSON to minify.
 # txt: Returns 0/${TRUE} if the JSON gets minified; 1/${FALSE} otherwise.
 # txt: If the function returns 0/TRUE, the variable RESULT contains the path of the minified file.
-# use: if minify_json_file "/tmp/my-file.json"; then
+# use: if minifyJsonFile "/tmp/my-file.json"; then
 # use:   echo "Minified file -> ${RESULT}";
 # use: else
 # use:   echo "Cannot minify /tmp/my-file.json";
 # use: fi
-function minify_json_file() {
+function minifyJsonFile() {
   local _input="${1}";
   checkNotEmpty input "${_input}" 1;
   local _result;
@@ -1378,8 +1436,8 @@ function retrieveAwsRegion() {
       _result="${_aux}";
       if isEmpty "${_result}"; then
         logTraceResult NEUTRAL "missing"
-	      logTrace -n "Using 'eu-west-1' as default region"
-	      export RESULT="eu-west-1";
+	      logTrace "Using 'eu-west-1' as default region";
+        _result="eu-west-1";
         _rescode=${TRUE};
       else
         logTraceResult SUCCESS "${_result}";
@@ -1573,7 +1631,7 @@ function parametersToKeyValuePairs() {
       fi
     fi
 
-    _result="${_result} $(cat "${_auxFile}" | grep -v AMI_ID | sort -u | uniq | grep -v -e '^#' | grep -v -e '^\s*$' | grep -v 'AWS_PROFILE' | awk -F'=' -v quote="'" '{if (keys[$1] == null || length(keys[$1] == 0)) {print $0;}; keys[$1]=$1;}' | awk -F'=' 'function toCamel(s) { camel = ""; split(s, words, /-|[^a-zA-Z0-9]/); for (i = 1; i in words; i++){camel = camel toupper(substr(words[i], 1, 1)) tolower(substr(words[i], 2)) }; return camel } { gsub(/"/, "", $2); gsub(/^/, quote, $2); gsub(/$/, quote, $2); printf(" ParameterKey=%s,ParameterValue=|_quote_|%s|_quote_|", toCamel($1), $2);}')";
+    _result="${_result} $(cat "${_auxFile}" | grep -v AMI_ID | grep -v AWS_REGION | sort -u | uniq | grep -v -e '^#' | grep -v -e '^\s*$' | grep -v 'AWS_PROFILE' | awk -F'=' -v quote="'" '{if (keys[$1] == null || length(keys[$1] == 0)) {print $0;}; keys[$1]=$1;}' | awk -F'=' 'function toCamel(s) { camel = ""; split(s, words, /-|[^a-zA-Z0-9]/); for (i = 1; i in words; i++){camel = camel toupper(substr(words[i], 1, 1)) tolower(substr(words[i], 2)) }; return camel } { gsub(/"/, "", $2); gsub(/^/, quote, $2); gsub(/$/, quote, $2); printf(" ParameterKey=%s,ParameterValue=|_quote_|%s|_quote_|", toCamel($1), $2);}')";
   fi
 
   export RESULT="${_result}";
@@ -1754,18 +1812,7 @@ EOF
 function deployAll() {
   local _stack;
 
-  local _oldIFS="${IFS}";
-  local _file;
-  IFS="${DWIFS}";
-  for _file in .deploy-stack.inc.sh \
-               .deploy-stack.inc.sh.${CLIENT}-${ENVIRONMENT} \
-               .deploy-all.inc.sh.${CLIENT}-${ENVIRONMENT}; do
-    IFS="${_oldIFS}";
-    if fileExists "${_file}"; then
-      source "${_file}";
-    fi
-  done
-  IFS="${_oldIFS}";
+  readIncFiles "${ENVIRONMENT}" "${CLIENT}";
 
   if retrieveStackChain; then
     local _chain="${RESULT}";
@@ -1785,7 +1832,7 @@ function deployAll() {
         logInfoResult NEUTRAL "deployed";
       else
         cacheStackAsFailed "${_stack}";
-        if createOrUpdateStack "${_stack}" "${ACTION}" "${ENVIRONMENT}" "${CLIENT}"; then
+        if createOrUpdateStack "${_stack}" "${ACTION}" "${ENVIRONMENT}" ${FALSE} "${CLIENT}"; then
           cacheStackAsSuccessfullyDeployed "${_stack}";
         fi
       fi
@@ -1934,24 +1981,13 @@ function cacheStackAsSuccessfullyDeleted() {
 
 # fun: deleteAll
 # api: public
-# txt: Manages the deployment of all stacks as a whole.
+# txt: Manages the deletion of all stacks as a whole.
 # txt: Returns 0/TRUE always. In case of error, it exits.
-# use: deployAll;
+# use: deleteAll;
 function deleteAll() {
   local _stack;
 
-  local _oldIFS="${IFS}";
-  local _file;
-  IFS="${DWIFS}";
-  for _file in .deploy-stack.inc.sh \
-               .deploy-stack.inc.sh.${CLIENT}-${ENVIRONMENT} \
-               .deploy-all.inc.sh.${CLIENT}-${ENVIRONMENT}; do
-    IFS="${_oldIFS}";
-    if fileExists "${_file}"; then
-      source "${_file}";
-    fi
-  done
-  IFS="${_oldIFS}";
+  readIncFiles "${ENVIRONMENT}" "${CLIENT}";
 
   if retrieveStackChain; then
     local _chain="${RESULT}";
@@ -1966,7 +2002,7 @@ function deleteAll() {
     IFS="${DWIFS}";
     for _stack in $(echo ${_chain} | tr -s ' ' '\n' | tac); do
       IFS="${_oldIFS}";
-      if deleteStack "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
+      if deleteStack "${_stack}" "${ENVIRONMENT}" ${FALSE} "${CLIENT}"; then
         cacheStackAsSuccessfullyDeleted "${_stack}";
       else
         cacheStackAsFailed "${_stack}";

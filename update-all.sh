@@ -3,16 +3,19 @@
 # api: public
 # txt: Updates all stacks, in order.
 
+DW.import aws-deploy;
+
 # fun: main
 # api: public
-# txt: update all stacks, in order.
+# txt: updates all stacks, in order.
 function main() {
-  $(dirname ${BASH_SOURCE[0]})/deploy-all.sh -v update ${ENVIRONMENT} ${CLIENT};
+  deployAll;
 }
 
 # metadata
-setScriptDescription "Update all stacks, in order";
+setScriptDescription "Updates all stacks, in order";
 
 # cli
-addCommandLineParameter e environment "The environment" MANDATORY EXPECTS_ARGUMENT;
-addCommandLineParameter c client "The client" OPTIONAL EXPECTS_ARGUMENT;
+addCommandLineParameter environment "The environment" MANDATORY SINGLE;
+addCommandLineParameter client "The client" OPTIONAL SINGLE;
+# vim: syntax=sh ts=2 sw=2 sts=4 sr noet

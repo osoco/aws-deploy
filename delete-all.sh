@@ -18,9 +18,4 @@ function main() {
 
 # script metadata
 setScriptDescription "Manages the deletion of all stacks as a whole";
-setScriptUrl "https://github.com/osoco/aws-deploy";
-
-addCommandLineParameter environment "The environment where the stack is or will be deployed. For environment-wide settings, define them in a file [environment].config in the root folder" MANDATORY SINGLE;
-addCommandLineParameter client "The specific client" OPTIONAL SINGLE;
-
 # vim: syntax=sh ts=2 sw=2 sts=4 sr noet
