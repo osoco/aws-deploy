@@ -1656,11 +1656,12 @@ function AWS_DEPLOY.extractItemFromDynamicReference() {
 }
 
 
-# fun: resolveDynamicReference dynamicReference awsProfile environment client?
+# fun: resolveDynamicReference dynamicReference awsProfile awsRegion environment client?
 # api: public
 # txt: Resolves a dynamic reference.
 # opt: dynamicReference: The dynamic reference.
 # opt: awsProfile: The AWS profile.
+# opt: awsRegion: The AWS region.
 # opt: environment: The environment.
 # opt: client: The client (optional).
 # txt: Returns 0/${TRUE} if the reference could be resolved successfully; 1/${FALSE} otherwise.
@@ -1673,9 +1674,11 @@ function resolveDynamicReference() {
   checkNotEmpty dynamicReference "${_dynamicReference}" 1;
   local _awsProfile="${2}";
   checkNotEmpty awsProfile "${_awsProfile}" 2;
-  local _environment="${3}";
-  checkNotEmpty environment "${_environment}" 3;
-  local _client="${4}";
+  local _awsRegion="${3}";
+  checkNotEmpty awsRegion "${_awsRegion}" 3;
+  local _environment="${4}";
+  checkNotEmpty environment "${_environment}" 4;
+  local _client="${5}";
 
   local -i _rescode=${FALSE};
   local _result;
@@ -1689,47 +1692,50 @@ function resolveDynamicReference() {
     if extractOutputFromDynamicReference "${_dynamicReference}"; then
       local _output="${RESULT}";
       logDebug -n "Retrieving ${_stackName}-${_output} export";
-      if getCloudformationExport "${_stackName}-${_output}" "${_awsProfile}"; then
+      if getCloudformationExport "${_stackName}-${_output}" "${_awsProfile}" "${_awsRegion}"; then
         _result="${RESULT}";
         logDebugResult SUCCESS "${RESULT:-unknown}";
         _rescode=${TRUE};
       else
         logDebugResult FAILURE "${ERROR:-failed}";
+        exitWithErrorCode CANNOT_RETRIEVE_CLOUDFORMATION_EXPORT "${_stackName}-${_output}";
       fi
     fi
   fi
 
   if isTrue ${_rescode}; then
-    echo "dynamic reference: ${_dynamicReference} -> ${RESULT}";
     export RESULT="${_result}";
   fi
 
   return ${_rescode};
 }
 
-# fun: resolveImports stackName stack environment client?
+# fun: resolveImports awsProfile awsRegion stackName stack environment client?
 # api: public
 # txt: Resolves dynamic imports for a given stack.
 # opt: awsProfile: The AWS profile.
+# opt: awsRegion: The AWS region.
 # opt: stackName: The stack name.
 # opt: stack: The stack.
 # opt: environment: The environment.
 # opt: client: The client (optional).
 # txt: Returns 0/${TRUE} if the imports could be resolved successfully; 1/${FALSE} otherwise.
 # txt: If the function returns 0/TRUE, the variable RESULT contains the contents of a file with variable definitions and their imported values.
-# use: if resolveImports "my-profile" "pre-groucho-1-network" "network" "pre" "client1"; then
+# use: if resolveImports "my-profile" eu-west-1 "pre-groucho-1-network" "network" "pre" "client1"; then
 # use:   echo "Resolved imports: ${RESULT}";
 # use: fi
 function resolveImports() {
   local _awsProfile="${1}";
   checkNotEmpty awsProfile "${_awsProfile}" 1;
-  local _stackName="${2}";
-  checkNotEmpty stackName "${_stackName}" 2;
-  local _stack="${3}";
-  checkNotEmpty stack "${_stack}" 3;
-  local _environment="${4}";
-  checkNotEmpty environment "${_environment}" 4;
-  local _client="${5}";
+  local _awsRegion="${2}";
+  checkNotEmpty awsRegion "${_awsRegion}" 2;
+  local _stackName="${3}";
+  checkNotEmpty stackName "${_stackName}" 3;
+  local _stack="${4}";
+  checkNotEmpty stack "${_stack}" 4;
+  local _environment="${5}";
+  checkNotEmpty environment "${_environment}" 5;
+  local _client="${6}";
 
   local -i _rescode=${TRUE};
 
@@ -1749,7 +1755,7 @@ function resolveImports() {
       extractValueInPair "${_import}";
       local _dynamicReference="${RESULT}";
       logTrace -n "Resolving dynamic reference ${_variableName}";
-      if resolveDynamicReference "${_dynamicReference}" "${_awsProfile}" "${_environment}" "${_client}"; then
+      if resolveDynamicReference "${_dynamicReference}" "${_awsProfile}" "${_awsRegion}" "${_environment}" "${_client}"; then
         echo "${_variableName}=${RESULT}" >> "${_tmpFile}";
         logTraceResult SUCCESS "${RESULT}";
       else
@@ -1836,20 +1842,22 @@ function parametersToKeyValuePairs() {
     done
     IFS="${_oldIFS}";
 
+    local _region;
+    if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+      _region="${RESULT}";
+    fi
+
     if grep "AMI_ID" "${_auxFile}" 2>&1 > /dev/null; then
-      if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
-        local _region="${RESULT}";
-        local _ec2InstanceType="$(grep "EC2_INSTANCE_TYPE" "${_auxFile}")";
-        retrieveOptimizedAmiFamily "${_ec2InstanceType}";
-        local _ec2Architecture="${RESULT}";
-        if retrieveOptimizedAmiId "${_awsProfile}" "${_region}" "${_ec2Architecture}"; then
-          local _amiId="${RESULT}";
-          _result="${_result} ParameterKey=AmiId,ParameterValue=${_amiId}";
-        fi
+      local _ec2InstanceType="$(grep "EC2_INSTANCE_TYPE" "${_auxFile}")";
+      retrieveOptimizedAmiFamily "${_ec2InstanceType}";
+      local _ec2Architecture="${RESULT}";
+      if retrieveOptimizedAmiId "${_awsProfile}" "${_region}" "${_ec2Architecture}"; then
+        local _amiId="${RESULT}";
+        _result="${_result} ParameterKey=AmiId,ParameterValue=${_amiId}";
       fi
     fi
 
-    if resolveImports "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
+    if resolveImports "${_awsProfile}" "${_region}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
       local _imports="${RESULT}";
       if isNotEmpty "${_imports}"; then
         cat "${_imports}" >> "${_auxFile}";
@@ -2105,7 +2113,7 @@ function deployAll() {
       IFS="${_oldIFS}";
       if isStackCreated "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
         logInfo -n "${_stack}";
-        logInfoResult NEUTRAL "deployed";
+        logInfoResult NEUTRAL "created";
       else
         cacheStackAsFailed "${_stack}";
         if createOrUpdateStack "${_stack}" "${_action}" "${ENVIRONMENT}" ${FALSE} "${CLIENT}"; then
@@ -2611,6 +2619,7 @@ addError DELETE_PRECONDITIONS_NOT_MET "Delete preconditions not met in stack";
 addError DELETE_PREHOOK_FAILED "delete-pre-hook.sh failed";
 addError DELETE_POSTCONDITIONS_NOT_MET "Delete postconditions not met in stack";
 addError DELETE_POSTHOOK_FAILED "delete-post-hook.sh failed";
+addError CANNOT_RETRIEVE_CLOUDFORMATION_EXPORT "Cannot retrieve Cloudformation export";
 
 # environment variables
 defineEnvVar GIT_COMMIT OPTIONAL "The git commit used when deploying stacks" "b12c68a";
