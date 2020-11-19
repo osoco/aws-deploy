@@ -52,11 +52,7 @@ function createOrUpdateStack() {
     exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
   fi
 
-  if ! retrieveIndexes "${_stack}"; then
-    exitWithErrorCode MISSING_STACK_INDEX "${_stack}";
-  fi
-  local _stackIndexes="${RESULT}";
-  buildStackName "${_stack}" "${_environment}" "${_stackIndexes}" "${_client}";
+  buildStackName "${_stack}" "${_environment}" "${_client}";
   export STACK_NAME="${RESULT}";
 
   if isStackEnabled "${_stack}"; then
@@ -114,13 +110,15 @@ function createOrUpdateStack() {
 # txt: Reads / sources the inc files.
 # opt: environment: The environment. Optional.
 # opt: client: The client. Optional.
-# txt: Returns 0/TRUE if at least one inc file could be read.
+# txt: Returns 0/TRUE if all files could be read with no error.
 # use: if readIncFiles staging; then
 # use:   echo "Inc files read successfully";
 # use: fi
 function readIncFiles() {
   local _environment="${1}";
   local _client="${2}";
+
+  local -i _rescode=${TRUE};
 
   local _incFiles=( .aws-deploy.inc.sh );
   if isNotEmpty "${_client}"; then
@@ -141,10 +139,19 @@ function readIncFiles() {
   for _file in ${_incFiles[@]}; do
     IFS="${_oldIFS}";
     if fileExists "${_file}"; then
-      source "${_file}";
+      logTrace -n "Reading ${_file}";
+      if source "${_file}"; then
+        logTraceResult SUCCESS "done";
+      else
+        logTraceResult FAILURE "failed";
+        _rescode=${FALSE};
+        break;
+      fi
     fi
   done
   IFS="${_oldIFS}";
+
+  return ${_rescode};
 }
 
 # fun: deleteStack stack environment client
@@ -176,17 +183,13 @@ function deleteStack() {
     exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
   fi
 
-  if ! retrieveIndexes "${_stack}"; then
-    exitWithErrorCode MISSING_STACK_INDEX "${_stack}";
-  fi
-  local _stackIndexes="${RESULT}";
-  buildStackName "${_stack}" "${_environment}" "${_stackIndexes}" "${_client}";
-  export STACK_NAME="${RESULT}";
+  buildStackName "${_stack}" "${_environment}" "${_client}";
+  local _stackName="${RESULT}";
 
   if isStackEnabled "${_stack}"; then
 
-    if ! checkStackDeletionStatus "${_stack}" "${STACK_NAME}" "${_environment}" "${_client}"; then
-      exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${STACK_NAME}";
+    if ! checkStackDeletionStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
+      exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${_stackName}";
     fi
 
     local _status="${RESULT}";
@@ -207,7 +210,7 @@ function deleteStack() {
         exitWithErrorCode DELETE_PRECONDITIONS_NOT_MET "${_stack}";
       fi
 
-      if ! awsDeleteStack "${_awsProfile}" "${STACK_NAME}" "${_environment}" "${_client}"; then
+      if ! awsDeleteStack "${_awsProfile}" "${_stackName}" "${_environment}" "${_client}"; then
         exitWithErrorCode ERROR_DELETING_STACK "${_stack}";
       fi
 
@@ -265,6 +268,8 @@ function awsDeleteStack() {
   else
     logDebugResult FAILURE "failed";
   fi
+
+  refreshAwsCloudformationExportsCache "${_awsProfile}";
 
   return ${_rescode};
 }
@@ -712,6 +717,8 @@ function deployStack() {
     _rescode=$?;
   fi
 
+  refreshAwsCloudformationExportsCache "${_awsProfile}";
+
   return ${_rescode};
 }
 
@@ -733,15 +740,7 @@ function isStackCreated() {
   local _client="${3}";
   local -i _rescode=${FALSE};
 
-  local _stackIndexes;
-
-  if retrieveIndexes "${_stack}"; then
-    _stackIndexes="${RESULT}";
-  else
-    exitWithErrorCode MISSING_INDEX_FOR_STACK "${_stack}";
-  fi
-
-  buildStackName "${_stack}" "${_environment}" "${_stackIndexes}" "${_client}";
+  buildStackName "${_stack}" "${_environment}" "${_client}";
   local _stackName="${RESULT}";
 
   if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
@@ -1155,25 +1154,22 @@ function minifyJsonFile() {
   return ${_rescode};
 }
 
-# fun: buildStackName stack environment indexes client?
+# fun: buildStackName stack environment client?
 # api: public
 # txt: Builds the final name for the stack.
 # opt: stack: The stack name.
 # opt: environment: The environment.
-# opt: indexes: The stack indexes. If multiple, pass them as a single argument.
 # opt: client: The client. Can be empty.
 # txt: Returns 0/TRUE always.
 # txt: The variable RESULT contains the final name of the stack.
-# use: buildStackName "network" "pre" 1 "my_client";
+# use: buildStackName "network" "pre" "my_client";
 # use: echo "Final name: ${RESULT}";
 function buildStackName() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
   local _environment="${2}";
   checkNotEmpty environment "${_environment}" 2;
-  local _indexes="${3}";
-  checkNotEmpty indexes "${_indexes}" 3;
-  local _client="${4}";
+  local _client="${3}";
   local _result="${_environment}";
 
   if isNotEmpty "${_client}" && isNotEmpty "${OMIT_CLIENT_IN_STACK_NAME}" && isFalse ${OMIT_CLIENT_IN_STACK_NAME}; then
@@ -1184,18 +1180,21 @@ function buildStackName() {
     _result="${_result}-contestia";
   fi
 
-  local _indexArray=(${_indexes});
-  local _stackArray=($(echo ${_stack} | sed 's|/| |g'));
-
   local _pieces="$(echo ${_stack} | awk -F'/' '{print NF;}')";
-  local _piece;
+
   local _oldIFS="${IFS}";
+  local _piece;
+  local _pieceIndex=0;
   IFS="${DWIFS}";
-  for _piece in $(seq 0 $((_pieces-1))); do
-    retrieveNthIndexOfPath "${_stack}" ${_piece};
+
+  for _piece in $(echo "${_stack}" | sed 's|/| |g'); do
+    _IFS="${_oldIFS}";
+    retrieveNthIndexOfPath "${_stack}" ${_pieceIndex};
     local _index="${RESULT}";
-    _result="${_result}-${_index}-${_stackArray[${_piece}]}";
+    _result="${_result}-${_index}-${_piece}";
+    ((_pieceIndex++));
   done
+  _IFS="${_oldIFS}";
 
   export RESULT="${_result}";
 }
@@ -1251,7 +1250,11 @@ function retrieveIndexes() {
   if retrieveIndex "${_stack}"; then
     local -i _pieces="$(echo "${_stack}" | awk -F'/' '{print NF};')";
 
+    local _oldIFS="${IFS}";
+    local _piece;
+    IFS="${DWIFS}";
     for _piece in $(seq 1 ${_pieces}); do
+      IFS="${_oldIFS}";
       local _category="$(echo "${_stack}" | awk -F'/' -v pos=${_piece} '{ for(i=1;i<=pos;i++){ printf("%s/", $i); }}' | sed 's /$  g')";
       if    isNotEmpty "${_category}" \
          && retrieveIndex "${_category}"; then
@@ -1265,6 +1268,7 @@ function retrieveIndexes() {
         break;
       fi
     done
+    IFS="${_oldIFS}";
   fi
 
   if isTrue ${_rescode}; then
@@ -1548,6 +1552,226 @@ function retrieveOptimizedAmiFamily() {
   return ${TRUE};
 }
 
+# fun: retrieveImports stackName stack environment client?
+# api: public
+# txt: Retrieves the imports for a given stack.
+# opt: awsProfile: The AWS profile.
+# opt: stackName: The stack name.
+# opt: stack: The stack.
+# opt: environment: The environment.
+# opt: client: The client (optional).
+# txt: Returns 0/${TRUE} if there're imports for given stack; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the contents of a file with variable definitions and their unresolved references.
+# use: if retrieveImports "my-profile" "pre-groucho-1-network" "network" "pre" "client1"; then
+# use:   echo "Unresolved imports: ${RESULT}";
+# use: fi
+function retrieveImports() {
+  local _awsProfile="${1}";
+  checkNotEmpty awsProfile "${_awsProfile}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _environment="${4}";
+  checkNotEmpty environment "${_environment}" 4;
+  local _client="${5}";
+
+  local -i _rescode=${FALSE};
+
+  if fileExists "${_stack}/imports.config"; then
+    export RESULT="$(grep -v -e '^#' ${_stack}/imports.config)";
+    _rescode=${TRUE};
+  fi
+
+  return ${_rescode};
+}
+
+# fun: extractStackFromDynamicReference dynamicReference
+# api: public
+# txt: Given a dynamic reference, it extracts the stack name.
+# opt: dynamicReference: The dynamic reference.
+# txt: Returns 0/TRUE if the stack name could be extracted; 1/FALSE otherwise.
+# use: if extractStackFromDynamicReference "a!b"; then
+# use:   echo "Stack: ${RESULT}"; # a
+# use: fi
+function extractStackFromDynamicReference() {
+  local _dynamicReference="${1}";
+  checkNotEmpty dynamicReference "${_dynamicReference}" 1;
+
+  AWS_DEPLOY.extractItemFromDynamicReference "${_dynamicReference}" 0;
+  local -i _rescode=$?;
+
+  return ${_rescode};
+}
+
+# fun: extractOutputFromDynamicReference dynamicReference
+# api: public
+# txt: Given a dynamic reference, it extracts the stack output.
+# opt: dynamicReference: The dynamic reference.
+# txt: Returns 0/TRUE if the stack output could be extracted; 1/FALSE otherwise.
+# use: if extractOutputFromDynamicReference "a!b"; then
+# use:   echo "Output: ${RESULT}"; # b
+# use: fi
+function extractOutputFromDynamicReference() {
+  local _dynamicReference="${1}";
+  checkNotEmpty dynamicReference "${_dynamicReference}" 1;
+
+  AWS_DEPLOY.extractItemFromDynamicReference "${_dynamicReference}" 1;
+  local -i _rescode=$?;
+
+  return ${_rescode};
+}
+
+# fun: AWS_DEPLOY.extractItemFromDynamicReference dynamicReference index
+# api: private
+# txt: Given a dynamic reference, it extracts the element matching the index.
+# opt: dynamicReference: The dynamic reference.
+# opt: index: The index (either 0 or 1).
+# txt: Returns 0/TRUE if the element could be extracted; 1/FALSE otherwise.
+# use: if AWS_DEPLOY.extractItemFromDynamicReference "a!b" 1; then
+# use:   echo "Element at 1: ${RESULT}"; # b
+# use: fi
+function AWS_DEPLOY.extractItemFromDynamicReference() {
+  local _dynamicReference="${1}";
+  checkNotEmpty dynamicReference "${_dynamicReference}" 1;
+  local _index="${2}";
+  checkNotEmpty index "${_index}" 2;
+
+  local -i _rescode=${FALSE};
+  local _result;
+
+  local -a _pieces;
+  if isNumber "${_index}" && split "${_dynamicReference}" "!" _pieces; then
+    if nth ${_index} _pieces; then
+      _result="${RESULT}";
+      _rescode=${TRUE};
+    fi
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+
+# fun: resolveDynamicReference dynamicReference awsProfile environment client?
+# api: public
+# txt: Resolves a dynamic reference.
+# opt: dynamicReference: The dynamic reference.
+# opt: awsProfile: The AWS profile.
+# opt: environment: The environment.
+# opt: client: The client (optional).
+# txt: Returns 0/${TRUE} if the reference could be resolved successfully; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the resolved reference.
+# use: if resolveDynamicReference "base/network!DnsHostedZoneId" "my-profile" "pre" "client1"; then
+# use:   echo "Resolved reference: ${RESULT}";
+# use: fi
+function resolveDynamicReference() {
+  local _dynamicReference="${1}";
+  checkNotEmpty dynamicReference "${_dynamicReference}" 1;
+  local _awsProfile="${2}";
+  checkNotEmpty awsProfile "${_awsProfile}" 2;
+  local _environment="${3}";
+  checkNotEmpty environment "${_environment}" 3;
+  local _client="${4}";
+
+  local -i _rescode=${FALSE};
+  local _result;
+
+  if extractStackFromDynamicReference "${_dynamicReference}"; then
+    local _stack="${RESULT}";
+
+    buildStackName "${_stack}" "${_environment}" "${_client}";
+    local _stackName="${RESULT}";
+
+    if extractOutputFromDynamicReference "${_dynamicReference}"; then
+      local _output="${RESULT}";
+      logDebug -n "Retrieving ${_stackName}-${_output} export";
+      if getCloudformationExport "${_stackName}-${_output}" "${_awsProfile}"; then
+        _result="${RESULT}";
+        logDebugResult SUCCESS "${RESULT:-unknown}";
+        _rescode=${TRUE};
+      else
+        logDebugResult FAILURE "${ERROR:-failed}";
+      fi
+    fi
+  fi
+
+  if isTrue ${_rescode}; then
+    echo "dynamic reference: ${_dynamicReference} -> ${RESULT}";
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: resolveImports stackName stack environment client?
+# api: public
+# txt: Resolves dynamic imports for a given stack.
+# opt: awsProfile: The AWS profile.
+# opt: stackName: The stack name.
+# opt: stack: The stack.
+# opt: environment: The environment.
+# opt: client: The client (optional).
+# txt: Returns 0/${TRUE} if the imports could be resolved successfully; 1/${FALSE} otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the contents of a file with variable definitions and their imported values.
+# use: if resolveImports "my-profile" "pre-groucho-1-network" "network" "pre" "client1"; then
+# use:   echo "Resolved imports: ${RESULT}";
+# use: fi
+function resolveImports() {
+  local _awsProfile="${1}";
+  checkNotEmpty awsProfile "${_awsProfile}" 1;
+  local _stackName="${2}";
+  checkNotEmpty stackName "${_stackName}" 2;
+  local _stack="${3}";
+  checkNotEmpty stack "${_stack}" 3;
+  local _environment="${4}";
+  checkNotEmpty environment "${_environment}" 4;
+  local _client="${5}";
+
+  local -i _rescode=${TRUE};
+
+  if retrieveImports "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
+    local _imports="${RESULT}";
+
+    createTempFile;
+    local _tmpFile="${RESULT}";
+
+    local _oldIFS="${IFS}";
+    local _import;
+    IFS="${DWIFS}";
+    for _import in ${_imports}; do
+      IFS="${_oldIFS}";
+      extractKeyInPair "${_import}";
+      local _variableName="${RESULT}";
+      extractValueInPair "${_import}";
+      local _dynamicReference="${RESULT}";
+      logTrace -n "Resolving dynamic reference ${_variableName}";
+      if resolveDynamicReference "${_dynamicReference}" "${_awsProfile}" "${_environment}" "${_client}"; then
+        echo "${_variableName}=${RESULT}" >> "${_tmpFile}";
+        logTraceResult SUCCESS "${RESULT}";
+      else
+        logTraceResult FAILURE "${ERROR:-error}";
+        _rescode=${FALSE};
+        break;
+      fi
+    done
+    IFS="${_oldIFS}";
+  else
+    logTrace "No imports found for stack ${_stack}";
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_tmpFile}";
+  else
+    export RESULT="";
+  fi
+
+  return ${_rescode};
+}
+
 # fun: parametersToKeyValuePairs stackName stack environment client?
 # api: public
 # txt: Converts the stack parameters to key=value pairs, key in camel case.
@@ -1580,27 +1804,20 @@ function parametersToKeyValuePairs() {
   local _inputFiles="";
   local -i _rescode;
   local _auxFile;
-  local _f;
+  local _oldIFS="${IFS}";
 
   _result="ParameterKey=Environment,ParameterValue=${_environment}";
 #  _result="ParameterKey=StackName,ParameterValue=${_stackName}";
   if retrieveDependentStacks "${_stack}"; then
     local _dependentStacks="${RESULT}";
-    local _oldIFS="${IFS}";
     IFS="${DWIFS}";
     for _otherStack in ${_dependentStacks}; do
       IFS="${_oldIFS}";
-      retrieveIndexes "${_otherStack}";
-      _otherStackIndexes="${RESULT}";
-      if isEmpty "${_otherStackIndexes}"; then
-        exitWithErrorCode MISSING_STACK_INDEX "${_otherStack}";
-      else
-        buildStackName "${_otherStack}" "${_environment}" "${_otherStackIndexes}" "${_client}";
-        _otherStackName="${RESULT}";
-        toCamelCase "$(echo ${_otherStack} | tr '[A-Z]' '[a-z]')_stack_name";
-        _camelCasedStackName="${RESULT}";
-        _result="${_result} ParameterKey=${_camelCasedStackName},ParameterValue=${_otherStackName}";
-      fi
+      buildStackName "${_otherStack}" "${_environment}" "${_client}";
+      _otherStackName="${RESULT}";
+      toCamelCase "$(echo ${_otherStack} | tr '[A-Z]' '[a-z]')_stack_name";
+      _camelCasedStackName="${RESULT}";
+      _result="${_result} ParameterKey=${_camelCasedStackName},ParameterValue=${_otherStackName}";
     done
     IFS="${_oldIFS}";
   fi
@@ -1611,10 +1828,11 @@ function parametersToKeyValuePairs() {
     _auxFile="${RESULT}";
 
     IFS="${DWIFS}";
+    local _f;
     for _f in ${_inputFiles}; do
       IFS="${_oldIFS}";
-      cat ${_f} >> ${_auxFile};
-      echo >> ${_auxFile}
+      cat ${_f} >> "${_auxFile}";
+      echo >> "${_auxFile}";
     done
     IFS="${_oldIFS}";
 
@@ -1631,10 +1849,46 @@ function parametersToKeyValuePairs() {
       fi
     fi
 
-    _result="${_result} $(cat "${_auxFile}" | grep -v AMI_ID | grep -v AWS_REGION | sort -u | uniq | grep -v -e '^#' | grep -v -e '^\s*$' | grep -v 'AWS_PROFILE' | awk -F'=' -v quote="'" '{if (keys[$1] == null || length(keys[$1] == 0)) {print $0;}; keys[$1]=$1;}' | awk -F'=' 'function toCamel(s) { camel = ""; split(s, words, /-|[^a-zA-Z0-9]/); for (i = 1; i in words; i++){camel = camel toupper(substr(words[i], 1, 1)) tolower(substr(words[i], 2)) }; return camel } { gsub(/"/, "", $2); gsub(/^/, quote, $2); gsub(/$/, quote, $2); printf(" ParameterKey=%s,ParameterValue=|_quote_|%s|_quote_|", toCamel($1), $2);}')";
+    if resolveImports "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
+      local _imports="${RESULT}";
+      if isNotEmpty "${_imports}"; then
+        cat "${_imports}" >> "${_auxFile}";
+      fi
+    fi
+
+    preprocessVariableFile "${_auxFile}" "${_stack}/$(basename ${_stack}).json";
+
+    _result="${_result} $(cat "${_auxFile}" | sort -u | uniq | grep -v -e '^#' | grep -v -e '^\s*$' | grep -v 'AWS_PROFILE' | awk -F'=' -v quote="'" '{if (keys[$1] == null || length(keys[$1] == 0)) {print $0;}; keys[$1]=$1;}' | awk -F'=' 'function toCamel(s) { camel = ""; split(s, words, /-|[^a-zA-Z0-9]/); for (i = 1; i in words; i++){camel = camel toupper(substr(words[i], 1, 1)) tolower(substr(words[i], 2)) }; return camel } { gsub(/"/, "", $2); gsub(/^/, quote, $2); gsub(/$/, quote, $2); printf(" ParameterKey=%s,ParameterValue=|_quote_|%s|_quote_|", toCamel($1), $2);}')";
   fi
 
   export RESULT="${_result}";
+}
+
+# fun: preprocessVariableFile file stackFile
+# api: public
+# txt: Preprocesses given variable file.
+# opt: file: The file to process.
+# opt: stackFile: The template file.
+# txt: Returns 0/TRUE always.
+# use: preprocessVariableFile myFile mystack.json;
+function preprocessVariableFile() {
+  local _file="${1}";
+  checkNotEmpty file "${_file}" 1;
+  local _stackFile="${2}";
+  checkNotEmpty stackFile "${_stackFile}" 2;
+
+  createTempFile;
+  local _tmpFile="${RESULT}";
+
+  if awsCloudformationJsonTemplateDefinesParameter "${_stackFile}" "AwsRegion"; then
+    logTrace "Respecting AWS_REGION parameter in ${_stackFile}";
+    cat "${_file}" | grep -v AMI_ID > "${_tmpFile}";
+  else
+    logTrace "Removing AWS_REGION as parameter in ${_stackFile}";
+    cat "${_file}" | grep -v AMI_ID | grep -v AWS_REGION > "${_tmpFile}";
+  fi
+
+  cp "${_tmpFile}" "${_file}";
 }
 
 # fun: retrieveOptimizedAmiId awsProfile region
@@ -1804,12 +2058,34 @@ EOF
   return ${_rescode};
 }
 
-# fun: deployAll
+# fun: createAll
 # api: public
 # txt: Manages the deployment of all stacks as a whole.
 # txt: Returns 0/TRUE always. In case of error, it exits.
-# use: deployAll;
+# use: createAll;
+function createAll() {
+  deployAll create;
+}
+
+# fun: updateAll
+# api: public
+# txt: Manages the update of all stacks as a whole.
+# txt: Returns 0/TRUE always. In case of error, it exits.
+# use: updateAll;
+function updateAll() {
+  deployAll update;
+}
+
+# fun: deployAll action
+# api: public
+# txt: Manages the deployment of all stacks as a whole.
+# opt: action: Either create or update.
+# txt: Returns 0/TRUE always. In case of error, it exits.
+# use: deployAll create;
 function deployAll() {
+  local _action="${1}";
+  checkNotEmpty action "${_action}" 1;
+
   local _stack;
 
   readIncFiles "${ENVIRONMENT}" "${CLIENT}";
@@ -1832,7 +2108,7 @@ function deployAll() {
         logInfoResult NEUTRAL "deployed";
       else
         cacheStackAsFailed "${_stack}";
-        if createOrUpdateStack "${_stack}" "${ACTION}" "${ENVIRONMENT}" ${FALSE} "${CLIENT}"; then
+        if createOrUpdateStack "${_stack}" "${_action}" "${ENVIRONMENT}" ${FALSE} "${CLIENT}"; then
           cacheStackAsSuccessfullyDeployed "${_stack}";
         fi
       fi
