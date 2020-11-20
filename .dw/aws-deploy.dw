@@ -702,6 +702,14 @@ function deployStack() {
   if parametersToKeyValuePairs "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
     local _parameters="${RESULT}";
     local _escapedParameters="$(echo "${_parameters}" | sed "s |_quote_| ' g")";
+    logTrace "requestCreateOrUpdateStack ${_action} \
+                 ${_awsProfile} \
+                 ${_stackName} \
+                 ${_region} \
+                 ${_template} \
+                 Key=Name,Value=${_stackName} Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag} \
+                 ${_escapedParameters}";
+
     requestCreateOrUpdateStack "${_action}" \
                                "${_awsProfile}" \
                                "${_stackName}" \
@@ -959,7 +967,7 @@ function waitUntilStackDeploymentFinishes() {
   local -i _rescode=${FALSE};
   local _status;
 
-  logInfo -n "Waiting for ${_stackName} to deploy ";
+  logInfo -n "Waiting for ${_stackName} to deploy";
   if retrieveStackStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
     _status="${RESULT}";
 
@@ -1578,9 +1586,33 @@ function retrieveImports() {
 
   local -i _rescode=${FALSE};
 
-  if fileExists "${_stack}/imports.config"; then
-    export RESULT="$(grep -v -e '^#' ${_stack}/imports.config)";
-    _rescode=${TRUE};
+  local _result="";
+
+  local _files=( "imports.config" );
+  if isNotEmpty "${_client}"; then
+    _files+=( "${_client}-imports.config" );
+  fi
+  _files+=( "${_environment}-imports.config" );
+  if isNotEmpty "${_client}"; then
+    _files+=( "${_environment}-${_client}-imports.config" );
+  fi
+  local _oldIFS="${IFS}";
+  local _file;
+  IFS="${DWIFS}";
+  for _file in ${_files[@]}; do
+    IFS="${_oldIFS}";
+    if fileExists "${_stack}/${_file}"; then
+      if isNotEmpty "${_result}"; then
+        _result="${_result}\n";
+      fi
+      _result="${_result}$(grep -v -e '^#' ${_stack}/${_file})";
+      _rescode=${TRUE};
+    fi
+  done
+  IFS="${_oldIFS}";
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
   fi
 
   return ${_rescode};
@@ -1644,7 +1676,9 @@ function AWS_DEPLOY.extractItemFromDynamicReference() {
   if isNumber "${_index}" && split "${_dynamicReference}" "!" _pieces; then
     if nth ${_index} _pieces; then
       _result="${RESULT}";
-      _rescode=${TRUE};
+      if isNotEmpty "${_result}"; then
+        _rescode=${TRUE};
+      fi
     fi
   fi
 
@@ -1700,6 +1734,9 @@ function resolveDynamicReference() {
         logDebugResult FAILURE "${ERROR:-failed}";
         exitWithErrorCode CANNOT_RETRIEVE_CLOUDFORMATION_EXPORT "${_stackName}-${_output}";
       fi
+    else
+      _result="${_stackName}";
+      _rescode=${TRUE};
     fi
   fi
 
@@ -1753,6 +1790,7 @@ function resolveImports() {
       extractKeyInPair "${_import}";
       local _variableName="${RESULT}";
       extractValueInPair "${_import}";
+      local _variableValue="${RESULT}";
       local _dynamicReference="${RESULT}";
       logTrace -n "Resolving dynamic reference ${_variableName}";
       if resolveDynamicReference "${_dynamicReference}" "${_awsProfile}" "${_awsRegion}" "${_environment}" "${_client}"; then
