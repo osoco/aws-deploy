@@ -1735,7 +1735,9 @@ function resolveDynamicReference() {
         exitWithErrorCode CANNOT_RETRIEVE_CLOUDFORMATION_EXPORT "${_stackName}-${_output}";
       fi
     else
+      logDebug -n "Resolving dynamic stack reference ${_dynamicReference}";
       _result="${_stackName}";
+      logDebugResult SUCCESS "${_result}";
       _rescode=${TRUE};
     fi
   fi
