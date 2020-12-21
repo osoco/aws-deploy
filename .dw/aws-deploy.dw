@@ -55,7 +55,7 @@ function createOrUpdateStack() {
   buildStackName "${_stack}" "${_environment}" "${_client}";
   export STACK_NAME="${RESULT}";
 
-  if isStackEnabled "${_stack}"; then
+  if isStackEnabled "${_stack}" "${_environment}" "${_client}"; then
 
     if ! checkStackDeploymentStatus "${_stack}" "${STACK_NAME}" "${_environment}" "${_client}"; then
       exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${STACK_NAME}";
@@ -186,7 +186,7 @@ function deleteStack() {
   buildStackName "${_stack}" "${_environment}" "${_client}";
   local _stackName="${RESULT}";
 
-  if isStackEnabled "${_stack}"; then
+  if isStackEnabled "${_stack}" "${_environment}" "${_client}"; then
 
     if ! checkStackDeletionStatus "${_stack}" "${_stackName}" "${_environment}" "${_client}"; then
       exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${_stackName}";
@@ -586,18 +586,26 @@ function runDeletePosthook() {
 # api: public
 # txt: Checks whether given stack is enabled or not.
 # opt: stack: The stack.
+# opt: environment: The environment.
+# opt: client: The ctlient.
 # txt: Returns 0/TRUE if the stack is enabled; 1/FALSE otherwise.
-# use: if isStackEnabled core; then
-# use:   echo "core is enabled";
+# use: if isStackEnabled core dev acme; then
+# use:   echo "core is enabled in dev environment for acme";
 # use: fi
 function isStackEnabled() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _client="${3}";
+  checkNotEmpty client "${_client}" 3;
 
   local -i _rescode=${FALSE};
 
   local _folder="$(basename ${_stack})";
-  if fileExists "${_stack}/${_folder}.json"; then
+
+  if ! fileExists "${_stack}/${_environment}-${_client}.disabled" \
+    && fileExists "${_stack}/${_folder}.json"; then
     _rescode=${TRUE};
 
     local _item;
@@ -718,6 +726,15 @@ function deployStack() {
                                "Key=Name,Value=${_stackName} Key=contestia:name,Value=${_stackName} Key=contestia:environment,Value=${_environment} Key=vendor,Value=Contestia Key=contestia:deploy:template,Value=${_stack} Key=contestia:deploy:template-version,Value=${GIT_COMMIT} Key=contestia:deploy:timestamp,Value=${_timestamp}${_clientTag}" \
                                "${_escapedParameters}";
     _rescode=$?;
+  fi
+
+  if isFalse ${_rescode}; then
+    if contains "${ERROR}" "already exists"; then
+      _rescode=${TRUE};
+    elif isNotEmpty "${ERROR}"; then
+      logInfo "${_stack} ${_action} error";
+      logInfo "${ERROR}";
+    fi
   fi
 
   if isTrue ${_rescode}; then
@@ -1725,13 +1742,30 @@ function resolveDynamicReference() {
 
     if extractOutputFromDynamicReference "${_dynamicReference}"; then
       local _output="${RESULT}";
-      logDebug -n "Retrieving ${_stackName}-${_output} export";
+
+      logDebug -n "Retrieving ${_stackName}-${_output} export in ${_awsRegion}";
       if getCloudformationExport "${_stackName}-${_output}" "${_awsProfile}" "${_awsRegion}"; then
         _result="${RESULT}";
         logDebugResult SUCCESS "${RESULT:-unknown}";
         _rescode=${TRUE};
       else
         logDebugResult FAILURE "${ERROR:-failed}";
+      fi
+
+      if   isFalse ${_rescode} \
+        && ! areEqual "${_awsRegion}" eu-west-1; then
+
+        logDebug -n "Trying to retrieve ${_stackName}-${_output} export now in eu-west-1";
+        if getCloudformationExport "${_stackName}-${_output}" "${_awsProfile}" "eu-west-1" ${TRUE}; then
+          _result="${RESULT}";
+          logDebugResult SUCCESS "${RESULT:-unknown}";
+          _rescode=${TRUE};
+        else
+          logDebugResult FAILURE "${ERROR:-failed}";
+        fi
+      fi
+
+      if isFalse ${_rescode}; then
         exitWithErrorCode CANNOT_RETRIEVE_CLOUDFORMATION_EXPORT "${_stackName}-${_output}";
       fi
     else
@@ -2060,7 +2094,7 @@ function retrieveStackChain() {
         IFS="${DWIFS}";
         for _stack in ${_stacks}; do
           IFS="${_oldIFS}";
-          if isStackEnabled "${_category}/${_stack}"; then
+          if isStackEnabled "${_category}/${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
             if retrieveIndexes "${_category}/${_stack}"; then
               local _stackIndex="";
               _stackIndexes="${RESULT}";
@@ -2141,7 +2175,7 @@ function deployAll() {
   if retrieveStackChain; then
     local _chain="${RESULT}";
 
-    if retrieveLastFailedToDeployStack; then
+    if retrieveCurrentStack; then
       local _lastStack="${RESULT}";
       if retrieveStacksPendingToDeploy "${_lastStack}" "${_chain}"; then
         _chain="${RESULT}";
@@ -2151,11 +2185,17 @@ function deployAll() {
     IFS="${DWIFS}";
     for _stack in ${_chain}; do
       IFS="${_oldIFS}";
-      if isStackCreated "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
-        logInfo -n "${_stack}";
-        logInfoResult NEUTRAL "created";
+      if areEqual "${_action}" create; then
+        if isStackCreated "${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
+          logInfo -n "${_stack}";
+          logInfoResult NEUTRAL "created";
+        else
+          cacheStackAsFailed "${_stack}";
+          if createOrUpdateStack "${_stack}" "${_action}" "${ENVIRONMENT}" ${FALSE} "${CLIENT}"; then
+            cacheStackAsSuccessfullyDeployed "${_stack}";
+          fi
+        fi
       else
-        cacheStackAsFailed "${_stack}";
         if createOrUpdateStack "${_stack}" "${_action}" "${ENVIRONMENT}" ${FALSE} "${CLIENT}"; then
           cacheStackAsSuccessfullyDeployed "${_stack}";
         fi
@@ -2214,19 +2254,19 @@ function retrieveStacksPendingToDeploy() {
   return ${_rescode};
 }
 
-# fun: retrieveLastFailedToDeployStack
+# fun: retrieveCurrentStack
 # api: public
-# txt: Retrieves the last stack that failed to deploy.
-# txt: Returns 0/TRUE if some stack failed to deploy; 1/FALSE otherwise.
-# txt: If the function returs 0/TRUE, the variable RESULT contains the failed stack.
-# use: if retrieveLastFailedToDeployStack; then
+# txt: Retrieves the current stack.
+# txt: Returns 0/TRUE if some stack failed to deploy or delete; 1/FALSE otherwise.
+# txt: If the function returs 0/TRUE, the variable RESULT contains the current stack.
+# use: if retrieveCurrentStack; then
 # use:   echo "Retrying ${RESULT}";
 # use: fi
-function retrieveLastFailedToDeployStack() {
+function retrieveCurrentStack() {
   local -i _rescode=${FALSE};
   local _result;
 
-  buildLastFailedStackCacheFilename;
+  buildCurrentStackCacheFilename;
   local _cacheFile="${RESULT}";
   if fileExists "${_cacheFile}"; then
     _result="$(cat "${_cacheFile}" 2> /dev/null)";
@@ -2258,7 +2298,7 @@ function cacheStackAsFailed() {
 
    local -i _rescode=${FALSE};
 
-   buildLastFailedStackCacheFilename;
+   buildCurrentStackCacheFilename;
    local _stackFile="${RESULT}";
    cat <<EOF > "${_stackFile}";
 ${_stack}
@@ -2276,7 +2316,7 @@ function cacheStackAsSuccessfullyDeployed() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
 
-  buildLastFailedStackCacheFilename;
+  buildCurrentStackCacheFilename;
   local _stackFile="${RESULT}";
   if cat "${_stackFile}" 2> /dev/null | grep "${_stack}" > /dev/null; then
     echo -n '' > "${_stackFile}";
@@ -2294,7 +2334,7 @@ function cacheStackAsSuccessfullyDeleted() {
   local _stack="${1}";
   checkNotEmpty stack "${_stack}" 1;
 
-  buildLastFailedStackCacheFilename;
+  buildCurrentStackCacheFilename;
   local _stackFile="${RESULT}";
   if cat "${_stackFile}" 2> /dev/null | grep "${_stack}" > /dev/null; then
     echo -n '' > "${_stackFile}";
@@ -2316,7 +2356,7 @@ function deleteAll() {
   if retrieveStackChain; then
     local _chain="${RESULT}";
 
-    if retrieveLastFailedToDeleteStack; then
+    if retrieveCurrentStack; then
       local _lastStack="${RESULT}";
       if retrieveStacksPendingToDelete "${_lastStack}" "${_chain}"; then
         _chain="$(echo ${RESULT} | tr -s ' ' '\n' | tac)";
@@ -2384,45 +2424,15 @@ function retrieveStacksPendingToDelete() {
   return ${_rescode};
 }
 
-# fun: retrieveLastFailedToDeleteStack
-# api: public
-# txt: Retrieves the last stack that failed to delete.
-# txt: Returns 0/TRUE if some stack failed to delete; 1/FALSE otherwise.
-# txt: If the function returs 0/TRUE, the variable RESULT contains the failed stack.
-# use: if retrieveLastFailedToDeleteStack; then
-# use:   echo "Retrying ${RESULT}";
-# use: fi
-function retrieveLastFailedToDeleteStack() {
-  local -i _rescode=${FALSE};
-  local _result;
-
-  buildLastFailedStackCacheFilename;
-  local _cacheFile="${RESULT}";
-  if fileExists "${_cacheFile}"; then
-    _result="$(cat "${_cacheFile}" 2> /dev/null)";
-    _rescode=$?;
-  fi
-
-  if isEmpty "${_result}"; then
-    _rescode=${FALSE};
-  fi
-
-  if isTrue ${_rescode}; then
-    export RESULT="${_result}";
-  fi
-
-  return ${_rescode};
-}
-
-# fun: buildLastFailedStackCacheFilename
+# fun: buildCurrentStackCacheFilename
 # api: public
 # txt: Builds the filename of the last failed stack.
 # txt: Returns 0/TRUE always.
 # txt: The variable RESULT contains the filename.
-# use: buildLastFailedStackCacheFilename;
-# use: echo "Last failed stack cache file: ${RESULT}";
-function buildLastFailedStackCacheFilename() {
-  export RESULT=".last-failed-stack-${ENVIRONMENT}-${CLIENT}";
+# use: buildCurrentStackCacheFilename;
+# use: echo "Current stack cache file: ${RESULT}";
+function buildCurrentStackCacheFilename() {
+  export RESULT=".current-stack-${ENVIRONMENT}-${CLIENT}";
 }
 
 # fun: retrieveCategories
