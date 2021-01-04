@@ -1922,7 +1922,7 @@ function parametersToKeyValuePairs() {
     fi
 
     if grep "AMI_ID" "${_auxFile}" 2>&1 > /dev/null; then
-      local _ec2InstanceType="$(grep "EC2_INSTANCE_TYPE" "${_auxFile}")";
+      local _ec2InstanceType="$(grep -e "^EC2_INSTANCE_TYPE=" "${_auxFile}" | grep -o '^[^#]*' )";
       retrieveOptimizedAmiFamily "${_ec2InstanceType}";
       local _ec2Architecture="${RESULT}";
       if retrieveOptimizedAmiId "${_awsProfile}" "${_region}" "${_ec2Architecture}"; then
