@@ -63,9 +63,12 @@ function createOrUpdateStack() {
 
     local _status="${RESULT}";
     if areEqual "${_action}" update || ! isStackDeployed "${_status}"; then
-      retrieveAwsProfile "${_stack}" "${_environment}" "${_client}";
-      local _awsProfile="${RESULT}";
-
+      if retrieveAwsProfile "${_stack}" "${_environment}" "${_client}"; then
+        local _awsProfile="${RESULT}";
+      else
+        exitWithErrorCode AWS_PROFILE_IS_MANDATORY;
+      fi
+      
       if ! retrieveTemplateFile "${_stack}"; then
         exitWithErrorCode MISSING_TEMPLATE_FILE "${_stack}/${_stack}.json";
       fi
@@ -251,7 +254,7 @@ function awsDeleteStack() {
   local _client="${4}";
 
   local _region;
-  if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+  if retrieveAwsRegionForProfile "${_awsProfile}"; then
     _region="${RESULT}";
   else
     _region="eu-west-1";
@@ -701,7 +704,7 @@ function deployStack() {
   local -i _rescode=${FALSE};
 
   local _region;
-  if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+  if retrieveAwsRegionForProfile "${_awsProfile}"; then
     _region="${RESULT}";
   else
     _region="eu-west-1";
@@ -862,7 +865,7 @@ function retrieveStackStatus() {
   fi
 
   local _region;
-  if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+  if retrieveAwsRegionForProfile "${_awsProfile}"; then
     _region="${RESULT}";
   else
     _region="eu-west-1";
@@ -1359,54 +1362,52 @@ function retrieveAwsProfile() {
   checkNotEmpty environment "${_environment}" 2;
   local _client="${3}";
   local _result;
-  local _aux;
   local -i _rescode=${FALSE};
   local _f;
   local _oldIFS="${IFS}";
 
-  AWS_DEPLOY.getCachedAwsProfile;
-  local _cachedAwsProfile="${RESULT}";
-
-  if isEmpty "${_cachedAwsProfile}"; then
-    if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
-      local _configFiles="${RESULT}";
-      IFS="${DWIFS}";
-      for _f in ${_configFiles}; do
-        IFS="${_oldIFS}";
-        logTrace -n "Looking for profile information in ${_f}";
-        _result="$(grep -e "^AWS_PROFILE=" "${_f}" | awk -F'=' '{print $2}')";
-        _rescode=$?;
-        if isTrue ${_rescode}; then
-          logTraceResult SUCCESS "${_result}";
-          break;
-        else
-          logTraceResult FAILURE "not found";
-        fi
-      done
+  if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
+    local _configFiles="${RESULT}";
+    IFS="${DWIFS}";
+    for _f in ${_configFiles}; do
       IFS="${_oldIFS}";
-    fi
-
-    if isFalse ${_rescode}; then
-      normalizeUppercase "${_environment}_${_client}";
-      _envUpcased="${RESULT}";
-      logTrace -n "Retrieving the default profile for ${_environment} environment (${_envUpcased}_AWS_PROFILE)";
-      local -n _aux="${_envUpcased}_AWS_PROFILE";
-      _result="${_aux}";
+      logTrace -n "Looking for profile information in ${_f}";
+      _result="$(grep -e "^AWS_PROFILE=" "${_f}" | awk -F'=' '{print $2}')";
+      _rescode=$?;
       if isEmpty "${_result}"; then
-        logTraceResult NEUTRAL "missing";
         _rescode=${FALSE};
-      else
-        logTraceResult SUCCESS "${_result}";
-        _rescode=${TRUE};
       fi
+
+      if isTrue ${_rescode}; then
+        logTraceResult SUCCESS "${_result}";
+        break;
+      else
+        logTraceResult FAILURE "not found";
+      fi
+    done
+    IFS="${_oldIFS}";
+  fi
+
+  if isFalse ${_rescode}; then
+    normalizeUppercase "${_environment}_${_client}";
+    _envUpcased="${RESULT}";
+    logTrace -n "Retrieving the default profile for ${_environment} environment (${_envUpcased}_AWS_PROFILE)";
+    local -n _aux="${_envUpcased}_AWS_PROFILE";
+    _result="${_aux}";
+    if isEmpty "${_result}"; then
+      logTraceResult NEUTRAL "missing";
+      _rescode=${FALSE};
+    else
+      logTraceResult SUCCESS "${_result}";
+      _rescode=${TRUE};
     fi
-    if isTrue ${_rescode}; then
-      AWS_DEPLOY.setCachedAwsProfile "${_result}";
-      export RESULT="${_result}";
-    fi
+  fi
+
+  if isEmpty "${_result}"; then
+    _rescode=${FALSE};
+    export RESULT="";
   else
-    export RESULT="${_cachedAwsProfile}";
-    _rescode=${TRUE};
+    export RESULT="${_result}";
   fi
 
   return ${_rescode};
@@ -1430,59 +1431,53 @@ function retrieveAwsRegion() {
   checkNotEmpty environment "${_environment}" 2;
   local _client="${3}";
   local _result;
-  local _aux;
   local -i _rescode;
   local _f;
 
-  AWS_DEPLOY.getCachedAwsRegion;
-  local _cachedAwsRegion="${RESULT}";
-
-  if isEmpty "${_cachedAwsRegion}"; then
-    local _oldIFS="${IFS}";
-    IFS="${DWIFS}";
-    if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
-      local _configFiles="${RESULT}";
-      for _f in ${_configFiles}; do
-        IFS="${_oldIFS}";
-        logTrace -n "Looking for region information in ${_f}";
-        _result="$(grep -e "^AWS_REGION=" "${_f}" | awk -F'=' '{print $2;}')";
-        _rescode=$?;
-        if isTrue ${_rescode}; then
-          logTraceResult SUCCESS "${_result}";
-          break;
-        else
-          logTraceResult FAILURE "not found";
-        fi
-      done
+  local _oldIFS="${IFS}";
+  IFS="${DWIFS}";
+  if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
+    local _configFiles="${RESULT}";
+    for _f in ${_configFiles}; do
       IFS="${_oldIFS}";
-    fi
-
-    if isFalse ${_rescode}; then
-      normalizeUppercase "${_environment}_${_client}";
-      _envUpcased="${RESULT}";
-      logTrace -n "Retrieving the default region for ${_environment} environment (${_envUpcased}_AWS_REGION)";
-      local -n _aux="${_envUpcased}_AWS_REGION";
-      _result="${_aux}";
+      logTrace -n "Looking for region information in ${_f}";
+      _result="$(grep -e "^AWS_REGION=" "${_f}" | awk -F'=' '{print $2;}')";
+      _rescode=$?;
       if isEmpty "${_result}"; then
-        logTraceResult NEUTRAL "missing"
-	      logTrace "Using 'eu-west-1' as default region";
-        _result="eu-west-1";
-        _rescode=${TRUE};
-      else
-        logTraceResult SUCCESS "${_result}";
-        _rescode=${TRUE};
+        _rescode=${FALSE};
       fi
-    fi
-
-    if isTrue ${_rescode}; then
-      AWS_DEPLOY.setCachedAwsRegion "${_result}";
-      export RESULT="${_result}";
-    fi
-  else
-    export RESULT="${_cachedAwsRegion}";
-    _rescode=${TRUE};
+      
+      if isTrue ${_rescode}; then
+        logTraceResult SUCCESS "${_result}";
+        break;
+      else
+        logTraceResult FAILURE "not found";
+      fi
+    done
+    IFS="${_oldIFS}";
   fi
 
+  if isFalse ${_rescode}; then
+    normalizeUppercase "${_environment}_${_client}";
+    _envUpcased="${RESULT}";
+    logTrace -n "Retrieving the default region for ${_environment} environment (${_envUpcased}_AWS_REGION)";
+    local -n _aux="${_envUpcased}_AWS_REGION";
+    _result="${_aux}";
+    if isEmpty "${_result}"; then
+      logTraceResult NEUTRAL "missing"
+	    logTrace "Using 'eu-west-1' as default region";
+      _result="eu-west-1";
+      _rescode=${TRUE};
+    else
+      logTraceResult SUCCESS "${_result}";
+      _rescode=${TRUE};
+    fi
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+  
   return ${_rescode};
 }
 
@@ -1510,7 +1505,7 @@ function retrieveConfigFiles() {
   local _f;
 
   AWS_DEPLOY.getCachedConfigFiles;
-  local _cachedConfigFiles="${RESULT}";
+  local _cachedConfigFiles=""; #"${RESULT}";
 
   if isEmpty "${_cachedConfigFiles}"; then
     local _folder="$(basename ${_stack})";
@@ -1812,6 +1807,7 @@ function resolveImports() {
 
   local -i _rescode=${TRUE};
 
+  echo "In resolveImports ${_awsProfile} ${_awsRegion} ${_stackName} ${_stack} ${_environment} ${_client}"
   if retrieveImports "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
     local _imports="${RESULT}";
 
@@ -1917,7 +1913,7 @@ function parametersToKeyValuePairs() {
     IFS="${_oldIFS}";
 
     local _region;
-    if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+    if retrieveAwsRegionForProfile "${_awsProfile}"; then
       _region="${RESULT}";
     fi
 
@@ -2652,6 +2648,7 @@ function AWS_DEPLOY.resetState() {
 
 # errors
 addError CANNOT_USE_AWS_CLI "Error using AWS CLI. Is the AWS profile (depends on the environment and client) correct?";
+addError AWS_PROFILE_IS_MANDATORY "No AWS_PROFILE entry found in any settings file";
 addError STACK_FOLDER_DOES_NOT_EXIST "stack folder not found";
 addError INVALID_CLOUDFORMATION_TEMPLATE "Invalid CloudFormation template";
 addError MISSING_STACK_SETTINGS ".config file not found for stack";
