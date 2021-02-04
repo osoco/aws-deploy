@@ -43,6 +43,7 @@ function createOrUpdateStack() {
     _readIncFiles=${TRUE};
   fi
   local _client="${5}";
+  local _awsProfile;
 
   if isTrue "${_readIncFiles}"; then
     readIncFiles "${_environment}" "${_client}";
@@ -64,7 +65,7 @@ function createOrUpdateStack() {
     local _status="${RESULT}";
     if areEqual "${_action}" update || ! isStackDeployed "${_status}"; then
       if retrieveAwsProfile "${_stack}" "${_environment}" "${_client}"; then
-        local _awsProfile="${RESULT}";
+        _awsProfile="${RESULT}";
       else
         exitWithErrorCode AWS_PROFILE_IS_MANDATORY;
       fi
@@ -703,15 +704,13 @@ function deployStack() {
   local _timestamp="$(date '+%Y%m%d%H%M%S')";
   local -i _rescode=${FALSE};
 
-  local _region;
-  if retrieveAwsRegionForProfile "${_awsProfile}"; then
-    _region="${RESULT}";
-  else
-    _region="eu-west-1";
-  fi
 
   if parametersToKeyValuePairs "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
     local _parameters="${RESULT}";
+    local _region="eu-west-1";
+    if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+      _region="${RESULT}";
+    fi
     local _escapedParameters="$(echo "${_parameters}" | sed "s |_quote_| ' g")";
     logTrace "requestCreateOrUpdateStack ${_action} \
                  ${_awsProfile} \
@@ -731,16 +730,19 @@ function deployStack() {
     _rescode=$?;
   fi
 
+  local _alreadyExists=${FALSE};
+  
   if isFalse ${_rescode}; then
     if contains "${ERROR}" "already exists"; then
       _rescode=${TRUE};
+      _alreadyExists=${TRUE};
     elif isNotEmpty "${ERROR}"; then
       logInfo "${_stack} ${_action} error";
       logInfo "${ERROR}";
     fi
   fi
 
-  if isTrue ${_rescode}; then
+  if isTrue ${_rescode} && isFalse ${_alreadyExists}; then
     waitUntilStackDeploymentFinishes "${_stack}" "${_stackName}" "${_environment}" "${_client}";
     _rescode=$?;
   fi
@@ -1807,7 +1809,6 @@ function resolveImports() {
 
   local -i _rescode=${TRUE};
 
-  echo "In resolveImports ${_awsProfile} ${_awsRegion} ${_stackName} ${_stack} ${_environment} ${_client}"
   if retrieveImports "${_awsProfile}" "${_stackName}" "${_stack}" "${_environment}" "${_client}"; then
     local _imports="${RESULT}";
 
@@ -1912,9 +1913,15 @@ function parametersToKeyValuePairs() {
     done
     IFS="${_oldIFS}";
 
-    local _region;
-    if retrieveAwsRegionForProfile "${_awsProfile}"; then
-      _region="${RESULT}";
+    local _region="";
+    if grep -e "^AWS_REGION=" "${_auxFile}" 2>&1 > /dev/null; then
+      _region="$(grep -e "^AWS_REGION=" "${_auxFile}" 2>&1 | head -n 1 | cut -d'=' -f 2)";
+    fi
+
+    if isEmpty "${_region}"; then
+      if retrieveAwsRegionForProfile "${_awsProfile}"; then
+        _region="${RESULT}";
+      fi
     fi
 
     if grep "AMI_ID" "${_auxFile}" 2>&1 > /dev/null; then
@@ -1960,10 +1967,10 @@ function preprocessVariableFile() {
 
   if awsCloudformationJsonTemplateDefinesParameter "${_stackFile}" "AwsRegion"; then
     logTrace "Respecting AWS_REGION parameter in ${_stackFile}";
-    cat "${_file}" | grep -v AMI_ID > "${_tmpFile}";
+    sort -r "${_file}" | grep -v -e '^#' | awk -F'=' '!($1 in a){a[$1];print}' | grep -v AMI_ID > "${_tmpFile}";
   else
     logTrace "Removing AWS_REGION as parameter in ${_stackFile}";
-    cat "${_file}" | grep -v AMI_ID | grep -v AWS_REGION > "${_tmpFile}";
+    sort -r "${_file}" | grep -v -e '^#' | awk -F'=' '!($1 in a){a[$1];print}' | grep -v AMI_ID | grep -v AWS_REGION > "${_tmpFile}";
   fi
 
   cp "${_tmpFile}" "${_file}";
