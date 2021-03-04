@@ -1,7 +1,7 @@
 Class {
 	#name : #BaselineOfAWSDeploy,
-	#superclass : #Object,
-	#category : 'BaselineOfAWSDeploy'
+	#superclass : #BaselineOf,
+	#category : #BaselineOfAWSDeploy
 }
 
 { #category : #baselines }
