@@ -43,5 +43,5 @@ BaselineOfAWSDeploy >> declareGroupsIn: spec [
 BaselineOfAWSDeploy >> declarePackagesIn: spec [
 	spec
 		package: #'AWSDeploy-Domain';
-    package: #'AWSDeploy-Tests' with: [ spec requires: #('AWSDeploy') ]
+    package: #'AWSDeploy-Domain-Tests' with: [ spec requires: #('AWSDeploy-Domain') ]
 ]
