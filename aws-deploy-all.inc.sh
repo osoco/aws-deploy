@@ -23,6 +23,9 @@ function dw_check_stack_cli_flag() {
 checkReq aws AWS_NOT_INSTALLED;
 checkReq jq JQ_NOT_INSTALLED;
 
+# env: FALLBACK_AWS_REGION: The AWS region used as fallback to retrieve CloudFormation exports.
+defineEnvVar FALLBACK_AWS_REGION MANDATORY "The AWS region used as fallback to retrieve CloudFormation exports." "eu-west-1";
+
 # env: KEY_NAME: The name of the SSH key.
 defineEnvVar KEY_NAME OPTIONAL "The name of the SSH key";
 

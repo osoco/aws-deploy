@@ -870,7 +870,7 @@ function retrieveStackStatus() {
   if retrieveAwsRegionForProfile "${_awsProfile}"; then
     _region="${RESULT}";
   else
-    _region="eu-west-1";
+    _region="${FALLBACK_AWS_REGION}";
   fi
 
   if checkCloudformationStackStatus "${_stackFullName}" "${_region}" "${_awsProfile}"; then
@@ -1087,7 +1087,8 @@ function readSettings() {
   local _environment="${2}";
   checkNotEmpty environment "${_environment}" 2;
   local _client="${3}";
-  local -i _rescode=${TRUE};
+  local -i _rescode;
+  _rescode=${TRUE};
   local _f;
 
   if retrieveConfigFiles "${_stack}" "${_environment}" "${_client}"; then
@@ -1098,12 +1099,19 @@ function readSettings() {
       IFS="${_oldIFS}";
       if fileExists "${_f}"; then
         logTrace -n "Reading ${_f} file";
-        source ${_f} 2> /dev/null;
+        local _output;
+        _output="$(source "${_f}" 2>&1)";
         _rescode=$?;
         if isTrue ${_rescode}; then
           logTraceResult SUCCESS "done";
         else
+          local _error;
+          _error="${_output}";
           logTraceResult FAILURE "failed";
+          if ! isEmpty "${_error}"; then
+            logTrace "${_error}";
+            export ERROR="${_error}";
+          fi
           break;
         fi
       fi
@@ -1714,7 +1722,7 @@ function AWS_DEPLOY.extractItemFromDynamicReference() {
 # opt: client: The client (optional).
 # txt: Returns 0/${TRUE} if the reference could be resolved successfully; 1/${FALSE} otherwise.
 # txt: If the function returns 0/TRUE, the variable RESULT contains the resolved reference.
-# use: if resolveDynamicReference "base/network!DnsHostedZoneId" "my-profile" "pre" "client1"; then
+# use: if resolveDynamicReference "base/network!DnsHostedZoneId" "my-profile" "us-east-1" "pre" "client1"; then
 # use:   echo "Resolved reference: ${RESULT}";
 # use: fi
 function resolveDynamicReference() {
@@ -1750,10 +1758,10 @@ function resolveDynamicReference() {
       fi
 
       if   isFalse ${_rescode} \
-        && ! areEqual "${_awsRegion}" eu-west-1; then
+        && ! areEqual "${_awsRegion}" "${FALLBACK_AWS_REGION}"; then
 
-        logDebug -n "Trying to retrieve ${_stackName}-${_output} export now in eu-west-1";
-        if getCloudformationExport "${_stackName}-${_output}" "${_awsProfile}" "eu-west-1" ${TRUE}; then
+        logDebug -n "Trying to retrieve ${_stackName}-${_output} export now in ${FALLBACK_AWS_REGION}";
+        if getCloudformationExport "${_stackName}-${_output}" "${_awsProfile}" "${FALLBACK_AWS_REGION}" ${TRUE}; then
           _result="${RESULT}";
           logDebugResult SUCCESS "${RESULT:-unknown}";
           _rescode=${TRUE};
