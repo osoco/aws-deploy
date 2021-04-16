@@ -1932,13 +1932,23 @@ function parametersToKeyValuePairs() {
       fi
     fi
 
-    if grep "AMI_ID" "${_auxFile}" 2>&1 > /dev/null; then
+    if grep -e "^AMI_ID=" "${_auxFile}" 2>&1 > /dev/null; then
       local _ec2InstanceType="$(grep -e "^EC2_INSTANCE_TYPE=" "${_auxFile}" | grep -o '^[^#]*' )";
       retrieveOptimizedAmiFamily "${_ec2InstanceType}";
       local _ec2Architecture="${RESULT}";
       if retrieveOptimizedAmiId "${_awsProfile}" "${_region}" "${_ec2Architecture}"; then
         local _amiId="${RESULT}";
         _result="${_result} ParameterKey=AmiId,ParameterValue=${_amiId}";
+      fi
+    fi
+
+    if grep -e "^EKS_AMI_ID=" "${_auxFile}" 2>&1 > /dev/null; then
+      local _nodeInstanceType="$(grep -e "^NODE_INSTANCE_TYPE=" "${_auxFile}" | grep -o '^[^#]*' )";
+      retrieveOptimizedAmiFamily "${_nodeInstanceType}";
+      local _nodeArchitecture="${RESULT}";
+      if retrieveEksOptimizedAmiId "${_awsProfile}" "${_region}" "${_nodeArchitecture}"; then
+        local _eksAmiId="${RESULT}";
+        _result="${_result} ParameterKey=EksAmiId,ParameterValue=${_eksAmiId}";
       fi
     fi
 
@@ -2007,6 +2017,41 @@ function retrieveOptimizedAmiId() {
   local _result;
 
   _result="$($(which aws) --profile "${_awsProfile}" ssm get-parameters --names /aws/service/ecs/optimized-ami/${_family}/recommended/image_id --region "${_region}" | jq '. | .Parameters[].Value' | tr -d '"')";
+  local -i _rescode=$?;
+  if isEmpty "${_result}"; then
+    _rescode=${FALSE};
+  fi
+
+  if isTrue ${_rescode}; then
+    export RESULT="${_result}";
+  fi
+
+  return ${_rescode};
+}
+
+# fun: retrieveEksOptimizedAmiId awsProfile region
+# api: public
+# txt: Retrieves the id of the Kubernetes optimized AMI for given region.
+# opt: awsProfile: The AWS profile.
+# opt: region: The region.
+# txt: Returns 0/TRUE if the id could be retrieved; 1/FALSE otherwise.
+# txt: If the function returns 0/TRUE, the variable RESULT contains the AMI id.
+# use: if retrieveEksOptimizedAmiId "mine" "us-east-1"; then
+# use:   echo "EKS AMI ID: ${RESULT}";
+# use: fi
+function retrieveEksOptimizedAmiId() {
+  local _awsProfile="${1}";
+  checkNotEmpty awsProfile "${_awsProfile}" 1;
+  local _region="${2}";
+  checkNotEmpty region "${_region}" 2;
+  local _family="${3}";
+  checkNotEmpty family "${_family}" 3;
+
+  local _type;
+
+  local _result;
+
+  _result="$($(which aws) --profile "${_awsProfile}" ssm get-parameters --names /aws/service/eks/optimized-ami/${K8S_VERSION}/${_family}/recommended/image_id --region "${_region}" | jq '. | .Parameters[].Value' | tr -d '"')";
   local -i _rescode=$?;
   if isEmpty "${_result}"; then
     _rescode=${FALSE};
@@ -2691,5 +2736,5 @@ defineEnvVar OMIT_STACKS OPTIONAL "The comma-separated values of stacks to omit"
 defineEnvVar STACK_CHECK_INTERVAL OPTIONAL "How often to check for the template deployment to finish" "10s";
 defineEnvVar DEFAULT_AWS_PROFILE OPTIONAL "The aws profile" "contestia-devops";
 defineEnvVar ECS_TASK_AMBASSADOR_IMAGE OPTIONAL "The ECS-TASK-Lite image" "406021078145.dkr.ecr.eu-west-1.amazonaws.com/ecs-task-kite:latest";
-
+defineEnvVar K8S_VERSION OPTIONAL "The version of Kubernetes" "1.19";
 # vim: syntax=sh ts=2 sw=2 sts=4 sr noet
