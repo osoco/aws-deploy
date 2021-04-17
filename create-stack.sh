@@ -13,7 +13,7 @@ DW.import aws-deploy;
 # txt: Returns 0/TRUE always, but can exit if an error is triggered.
 # use: main;
 function main() {
-  createOrUpdateStack "${STACK}" create "${ENVIRONMENT}" ${TRUE} "${CLIENT}";
+  createOrUpdateStack "${STACK}" create "${ENVIRONMENT}" "${PROFILE}" "${REGION}" ${TRUE} "${CLIENT}";
 }
 
 # script metadata

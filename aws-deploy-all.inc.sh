@@ -4,6 +4,8 @@ setScriptUrl "https://github.com/osoco/aws-deploy";
 # CLI
 addCommandLineFlag environment e "The environment where the stack is or will be deployed. For environment-wide settings, define them in a file [environment].config in the root folder" MANDATORY EXPECTS_ARGUMENT;
 addCommandLineFlag client c "The specific client" OPTIONAL EXPECTS_ARGUMENT;
+addCommandLineFlag profile p "The AWS profile" MANDATORY EXPECTS_ARGUMENT;
+addCommandLineFlag region r "The AWS region" OPTIONAL EXPECTS_ARGUMENT "eu-west-1";
 
 # fun: dw_check_stack_cli_flag
 # api: public
