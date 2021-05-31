@@ -12,7 +12,7 @@ DW.import aws-deploy;
 # txt: Deletes a Cloudformation stack for given environment/client combination in AWS.
 # txt: Returns 0/TRUE always, but can exit if an error is triggered.
 function main() {
-  deleteStack "${STACK}" "${ENVIRONMENT}" ${TRUE} "${CLIENT}";
+  deleteStack "${STACK}" "${ENVIRONMENT}" "${PROFILE}" "${REGION}" ${TRUE} "${CLIENT}";
 }
 
 # script metadata

@@ -6,6 +6,7 @@ addCommandLineFlag environment e "The environment where the stack is or will be 
 addCommandLineFlag client c "The specific client" OPTIONAL EXPECTS_ARGUMENT;
 addCommandLineFlag profile p "The AWS profile" MANDATORY EXPECTS_ARGUMENT;
 addCommandLineFlag region r "The AWS region" OPTIONAL EXPECTS_ARGUMENT "eu-west-1";
+addCommandLineFlag continue C "Continue in case of error" OPTIONAL NO_ARGUMENT;
 
 # fun: dw_check_stack_cli_flag
 # api: public
@@ -19,6 +20,15 @@ function dw_check_stack_cli_flag() {
   if ! folderExists "${_rootFolder}/${STACK}"; then
     exitWithErrorCode STACK_FOLDER_DOES_NOT_EXIST "${_rootFolder}/${STACK}";
   fi
+}
+
+# fun: dw_parse_continue_cli_flag
+# api: public
+# txt: Callback for parsing the continue flag.
+# txt: Returns 0/TRUE always.
+# use: dw_parse_continue_cli_flag "${flag}";
+function dw_parse_continue_cli_flag() {
+  export CONTINUE=${TRUE};
 }
 
 # Requirements

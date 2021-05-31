@@ -1,4 +1,4 @@
-#!/bin/env dry-wit
+#!/usr/bin/env dry-wit
 # Copyright 2018-today Osoco S.L.
 # Distributed under the terms of the GNU General Public License v3
 # mod: create-all.sh

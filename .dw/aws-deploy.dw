@@ -19,6 +19,17 @@ function AWS_DEPLOY.getModuleName() {
   return ${TRUE};
 }
 
+# fun: continueWithNextStack
+# api: public
+# txt: Checks whether we should continue with the next stack even if the current one fails.
+# txt: Returns 0/${TRUE} in such case; 1/${FALSE} otherwise.
+# use: if continueWithNextStack; then
+# use:   echo "Continuing...";
+# use: fi
+function continueWithNextStack() {
+  isTrue "${CONTINUE:-1}";
+}
+
 # fun: createOrUpdateStack stack action environment awsProfile awsRegion readIncFiles? client?
 # api: public
 # txt: Creates or updates a stack.
@@ -51,62 +62,117 @@ function createOrUpdateStack() {
   fi
   local _client="${7:-}";
 
+  local -i _noError=${TRUE};
+  continueWithNextStack;
+  local -i _continueWithNextStack=$?;
+
   if isTrue "${_readIncFiles}"; then
     readIncFiles "${_environment}" "${_client}";
   fi
 
   if ! readSettings "${_stack}" "${_environment}" "${_client}"; then
-    exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
+    _noError=${FALSE};
+    if isFalse ${_continueWithNextStack}; then
+      exitWithErrorCode MISSING_STACK_SETTINGS "${_stack}";
+    fi
   fi
 
-  buildStackName "${_stack}" "${_environment}" "${_client}";
-  export STACK_NAME="${RESULT}";
+  if isTrue ${_noError}; then
+    buildStackName "${_stack}" "${_environment}" "${_client}";
+    export STACK_NAME="${RESULT}";
 
-  if isStackEnabled "${_stack}" "${_environment}" "${_client}"; then
+    if isTrue ${_noError}; then
+      if isStackEnabled "${_stack}" "${_environment}" "${_client}"; then
 
-    if ! checkStackDeploymentStatus "${_stack}" "${STACK_NAME}" "${_environment}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-      exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${STACK_NAME}";
+        if ! checkStackDeploymentStatus "${_stack}" "${STACK_NAME}" "${_environment}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+          _noError=${FALSE};
+          if isFalse ${_continueWithNextStack}; then
+            exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${STACK_NAME}";
+          fi
+        fi
+
+        if isTrue ${_noError}; then
+          local _status="${RESULT}";
+          if areEqual "${_action}" update || ! isStackDeployed "${_status}"; then
+
+            if ! retrieveTemplateFile "${_stack}"; then
+              _noError=${FALSE};
+              if isFalse ${_continueWithNextStack}; then
+                exitWithErrorCode MISSING_TEMPLATE_FILE "${_stack}/${_stack}.json";
+              fi
+            fi
+
+            if isTrue ${_noError}; then
+              local _templateFile="${RESULT}";
+
+              if ! isCloudformationTemplateValid "${_templateFile}" "${_stack}" "${_awsProfile}" "${_awsRegion}"; then
+                _noError=${FALSE};
+                if isFalse ${_continueWithNextStack}; then
+                  exitWithErrorCode INVALID_CLOUDFORMATION_TEMPLATE "${_templateFile}";
+                fi
+              fi
+
+              if isTrue ${_noError}; then
+                if ! runDeployPrehook "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+                  _noError=${FALSE};
+                  if isFalse ${_continueWithNextStack}; then
+                    exitWithErrorCode DEPLOY_PREHOOK_FAILED "${_stack}";
+                  fi
+                fi
+
+                if isTrue ${_noError}; then
+                  displayDeployPreMessage "${_stack}";
+
+                  if ! checkDeployPreconditions "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+                    _noError=${FALSE};
+                    if isFalse ${_continueWithNextStack}; then
+                      exitWithErrorCode DEPLOY_PRECONDITIONS_NOT_MET "${_stack}";
+                    fi
+                  fi
+
+                  if isTrue ${_noError}; then
+                    if ! deployStack "${STACK_NAME}" "${_stack}" "${_templateFile}" "${_action}" "${_environment}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+                      _noError=${FALSE};
+                      if isFalse ${_continueWithNextStack}; then
+                        exitWithErrorCode ERROR_DEPLOYING_STACK "${_stack}";
+                      fi
+                    fi
+
+                    if isTrue ${_noError}; then
+                      displayDeployPostMessage "${_stack}";
+
+                      if ! runDeployPosthook "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+                        _noError=${FALSE};
+                        if isFalse ${_continueWithNextStack}; then
+                          exitWithErrorCode DEPLOY_POSTHOOK_FAILED "${_stack}";
+                        fi
+                      fi
+
+                      if isTrue ${_noError}; then
+                        if ! checkDeployPostconditions "${_environment}" "${_stack}"  "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+                          _noError=${FALSE};
+                          if isFalse ${_continueWithNextStack}; then
+                            exitWithErrorCode DEPLOY_POSTCONDITIONS_NOT_MET "${_stack}";
+                          fi
+                        fi
+                      fi
+                    fi
+                  fi
+                fi
+              fi
+            fi
+          fi
+        fi
+      else
+        logDebug -n "${_stack}";
+        logDebugResult NEUTRAL "skipped";
+      fi
     fi
+  fi
 
-    local _status="${RESULT}";
-    if areEqual "${_action}" update || ! isStackDeployed "${_status}"; then
-
-      if ! retrieveTemplateFile "${_stack}"; then
-        exitWithErrorCode MISSING_TEMPLATE_FILE "${_stack}/${_stack}.json";
-      fi
-      local _templateFile="${RESULT}";
-
-      if ! isCloudformationTemplateValid "${_templateFile}" "${_stack}" "${_awsProfile}" "${_awsRegion}"; then
-        exitWithErrorCode INVALID_CLOUDFORMATION_TEMPLATE "${_templateFile}";
-      fi
-
-      if ! runDeployPrehook "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode DEPLOY_PREHOOK_FAILED "${_stack}";
-      fi
-
-      displayDeployPreMessage "${_stack}";
-
-      if ! checkDeployPreconditions "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode DEPLOY_PRECONDITIONS_NOT_MET "${_stack}";
-      fi
-
-      if ! deployStack "${STACK_NAME}" "${_stack}" "${_templateFile}" "${_action}" "${_environment}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode ERROR_DEPLOYING_STACK "${_stack}";
-      fi
-
-      displayDeployPostMessage "${_stack}";
-
-      if ! runDeployPosthook "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode DEPLOY_POSTHOOK_FAILED "${_stack}";
-      fi
-
-      if ! checkDeployPostconditions "${_environment}" "${_stack}"  "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode DEPLOY_POSTCONDITIONS_NOT_MET "${_stack}";
-      fi
-    fi
-  else
+  if isFalse ${_noError}; then
     logDebug -n "${_stack}";
-    logDebugResult NEUTRAL "skipped";
+    logDebugResult FAILURE "failed";
   fi
 }
 
@@ -187,6 +253,10 @@ function deleteStack() {
   fi
   local _client="${6}";
 
+  local -i _noError=${TRUE};
+  continueWithNextStack;
+  local -i _continueWithNextStack=$?;
+
   if isTrue "${_readIncFiles}"; then
     readIncFiles "${_environment}" "${_client}";
   fi
@@ -201,42 +271,75 @@ function deleteStack() {
   if isStackEnabled "${_stack}" "${_environment}" "${_client}"; then
 
     if ! checkStackDeletionStatus "${_stack}" "${_stackName}" "${_environment}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-      exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${_stackName}";
+      _noError=${FALSE};
+      if isFalse ${_continueWithNextStack}; then
+        exitWithErrorCode ERROR_CHECKING_STACK_STATUS "${_stackName}";
+      fi
     fi
 
-    local _status="${RESULT}";
-    if isStackDeleted "${_status}"; then
-      logDebug -n "${_stack}";
-      logDebugResult SUCCESS "already deleted";
+    if isTrue ${_noError}; then
+      local _status="${RESULT}";
+      if isStackDeleted "${_status}"; then
+        logDebug -n "${_stack}";
+        logDebugResult SUCCESS "already deleted";
+      else
+
+        if ! runDeletePrehook "${_environment}" "${_stack}"  "${_awsProfile}"  "${_awsRegion}" "${_client}"; then
+          _noError=${FALSE};
+          if isFalse ${_continueWithNextStack}; then
+            exitWithErrorCode DELETE_PREHOOK_FAILED "${_stack}";
+          fi
+        fi
+
+        if isTrue ${_noError}; then
+          displayDeletePreMessage "${_stack}";
+
+          if ! checkDeletePreconditions "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+            _noError=${FALSE};
+            if isFalse ${_continueWithNextStack}; then
+              exitWithErrorCode DELETE_PRECONDITIONS_NOT_MET "${_stack}";
+            fi
+          fi
+
+          if isTrue ${_noError}; then
+            if ! awsDeleteStack "${_stackName}" "${_environment}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+              _noError=${FALSE};
+              if isFalse ${_continueWithNextStack}; then
+                exitWithErrorCode ERROR_DELETING_STACK "${_stack}";
+              fi
+            fi
+
+            if isTrue ${_noError}; then
+              displayDeletePostMessage "${_stack}";
+
+              if ! runDeletePosthook "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
+                _noError=${FALSE};
+                if isFalse ${_continueWithNextStack}; then
+                  exitWithErrorCode DELETE_POSTHOOK_FAILED "${_stack}";
+                fi
+              fi
+
+              if isTrue ${_noError}; then
+                if ! checkDeletePostconditions "${_environment}" "${_stack}" "${_awsProfile}"  "${_awsRegion}" "${_client}"; then
+                  _noError=${FALSE};
+                  if isFalse ${_continueWithNextStack}; then
+                    exitWithErrorCode DELETE_POSTCONDITIONS_NOT_MET "${_stack}";
+                  fi
+                fi
+              fi
+            fi
+          fi
+        fi
+      fi
     else
-
-      if ! runDeletePrehook "${_environment}" "${_stack}"  "${_awsProfile}"  "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode DELETE_PREHOOK_FAILED "${_stack}";
-      fi
-
-      displayDeletePreMessage "${_stack}";
-
-      if ! checkDeletePreconditions "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode DELETE_PRECONDITIONS_NOT_MET "${_stack}";
-      fi
-
-      if ! awsDeleteStack "${_stackName}" "${_environment}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode ERROR_DELETING_STACK "${_stack}";
-      fi
-
-      displayDeletePostMessage "${_stack}";
-
-      if ! runDeletePosthook "${_environment}" "${_stack}" "${_awsProfile}" "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode DELETE_POSTHOOK_FAILED "${_stack}";
-      fi
-
-      if ! checkDeletePostconditions "${_environment}" "${_stack}" "${_awsProfile}"  "${_awsRegion}" "${_client}"; then
-        exitWithErrorCode DELETE_POSTCONDITIONS_NOT_MET "${_stack}";
-      fi
+      logDebug -n "${_stack}";
+      logDebugResult NEUTRAL "skipped";
     fi
-  else
+  fi
+
+  if isFalse ${_noError}; then
     logDebug -n "${_stack}";
-    logDebugResult NEUTRAL "skipped";
+    logDebugResult FAILURE "failed";
   fi
 }
 
@@ -1188,6 +1291,9 @@ function retrieveTemplateFile() {
   local _result;
   local -i _rescode=${FALSE};
 
+  continueWithNextStack;
+  local -i _continueWithNextStack=$?;
+
   local _folder="$(basename ${_stack})";
   _result="${_stack}/${_folder}.json";
   if fileExists "${_result}"; then
@@ -1195,7 +1301,10 @@ function retrieveTemplateFile() {
       # RESULT is already exported by minifyJsonFile
       _rescode=${TRUE};
     else
-      exitWithErrorCode CANNOT_MINIFY_TEMPLATE "${_result}";
+      _rescode=${FALSE};
+      if isFalse ${_continueWithNextStack}; then
+        exitWithErrorCode CANNOT_MINIFY_TEMPLATE "${_result}";
+      fi
     fi
   else
     _rescode=${FALSE}
@@ -1786,7 +1895,10 @@ function resolveDynamicReference() {
   local _client="${5}";
 
   local -i _rescode=${FALSE};
-  local _result;
+  local _result="";
+
+  continueWithNextStack;
+  local -i _continueWithNextStack=$?;
 
   if extractStackFromDynamicReference "${_dynamicReference}"; then
     local _stack="${RESULT}";
@@ -1794,11 +1906,14 @@ function resolveDynamicReference() {
     buildStackName "${_stack}" "${_environment}" "${_client}";
     local _stackName="${RESULT}";
 
+    retrieveStackRegionOrElse "${_stack}" "${_environment}" "${_awsRegion}" "${_client}";
+    local _region="${RESULT}";
+
     if extractOutputFromDynamicReference "${_dynamicReference}"; then
       local _output="${RESULT}";
 
-      logDebug -n "Retrieving ${_stackName}-${_output} export in ${_awsRegion}";
-      if getCloudformationExport "${_stackName}-${_output}" ${FALSE} "${_awsProfile}" "${_awsRegion}"; then
+      logDebug -n "Retrieving ${_stackName}-${_output} export in ${_region}";
+      if getCloudformationExport "${_stackName}-${_output}" ${TRUE} "${_awsProfile}" "${_region}"; then
         _result="${RESULT}";
         logDebugResult SUCCESS "${RESULT:-unknown}";
         _rescode=${TRUE};
@@ -1807,19 +1922,7 @@ function resolveDynamicReference() {
       fi
 
       if   isFalse ${_rescode} \
-        && ! areEqual "${_awsRegion}" "${FALLBACK_AWS_REGION}"; then
-
-        logDebug -n "Trying to retrieve ${_stackName}-${_output} export now in ${FALLBACK_AWS_REGION}";
-        if getCloudformationExport "${_stackName}-${_output}" ${TRUE} "${_awsProfile}" "${FALLBACK_AWS_REGION}"; then
-          _result="${RESULT}";
-          logDebugResult SUCCESS "${RESULT:-unknown}";
-          _rescode=${TRUE};
-        else
-          logDebugResult FAILURE "${ERROR:-failed}";
-        fi
-      fi
-
-      if isFalse ${_rescode}; then
+        && isFalse ${_continueWithNextStack}; then
         exitWithErrorCode CANNOT_RETRIEVE_CLOUDFORMATION_EXPORT "${_stackName}-${_output}";
       fi
     else
@@ -1835,6 +1938,39 @@ function resolveDynamicReference() {
   fi
 
   return ${_rescode};
+}
+
+# fun: retrieveStackRegionOrElse stack environment region client?
+# api: public
+# txt: If given stack is specific for a region in given environment, retrieves
+# txt: that AWS region, otherwise the region provided as parameter.
+# opt: stack: The stack.
+# opt: region: The region used by default.
+# opt: client: The client. Optional.
+# txt: Returns 0/TRUE always.
+# txt: The variable RESULT contains the stack region.
+# use: retrieveStackRegionOrElse certificates/wildcard-us-east-1 dev eu-west-1;
+# use: echo "Region: ${RESULT}";
+function retrieveStackRegionOrElse() {
+  local _stack="${1}";
+  checkNotEmpty stack "${_stack}" 1;
+  local _environment="${2}";
+  checkNotEmpty environment "${_environment}" 2;
+  local _region="${3}";
+  checkNotEmpty region "${_region}" 3;
+  local _client="${4}";
+  checkNotEmpty client "${_client}" 4;
+
+  local _result;
+  if retrieveAwsRegion "${_stack}" "${_environment}" "${_client}"; then
+    _result="${RESULT}";
+  else
+    _result="${_region}";
+  fi
+
+  export RESULT="${_result}";
+
+  return ${TRUE};
 }
 
 # fun: resolveImports awsProfile awsRegion stackName stack environment client?
@@ -2164,6 +2300,10 @@ function retrieveStackChain() {
   local _result;
   local -i _rescode=${FALSE};
 
+  local -i _noError=${TRUE};
+  continueWithNextStack;
+  local -i _continueWithNextStack=$?;
+
   if retrieveCachedStackChain; then
     _rescode=${TRUE};
     _result="${RESULT}";
@@ -2183,45 +2323,56 @@ function retrieveStackChain() {
         if retrieveIndex "${_category}"; then
           _categoryIndex="${RESULT}";
         else
-          exitWithErrorCode CANNOT_RETRIEVE_CATEGORY_INDEX "${_category}";
+          _noError=${FALSE};
+          if isFalse ${_continueWithNextStack}; then
+            exitWithErrorCode CANNOT_RETRIEVE_CATEGORY_INDEX "${_category}";
+          fi
         fi
 
-        local _stacks="";
-        if retrieveStacksInCategory "${_category}"; then
-          local _categoryStacks="${RESULT}";
-          if isNotEmpty "${_categoryStacks}"; then
-            _stacks="${_stacks} ";
-          fi
-          _stacks="${_stacks}${_categoryStacks}";
-        else
-          exitWithErrorCode NO_STACKS_IN_CATEGORY_FOUND "${_category}";
-        fi
-        IFS="${DWIFS}";
-        for _stack in ${_stacks}; do
-          IFS="${_oldIFS}";
-          if isStackEnabled "${_category}/${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
-            if retrieveIndexes "${_category}/${_stack}"; then
-              local _stackIndex="";
-              _stackIndexes="${RESULT}";
-              local _index;
-              IFS="${DWIFS}";
-              for _index in ${_stackIndexes}; do
-                IFS="${_oldIFS}";
-                if isNotEmpty "${_index}"; then
-                  if isNotEmpty "${_stackIndex}"; then
-                    _stackIndex="${_stackIndex}-";
-                  fi
-                  _stackIndex="${_stackIndex}${_index}";
-                fi
-              done
-              IFS="${_oldIFS}";
+        if isTrue ${_noError}; then
+          local _stacks="";
+          if retrieveStacksInCategory "${_category}"; then
+            local _categoryStacks="${RESULT}";
+            if isNotEmpty "${_categoryStacks}"; then
+              _stacks="${_stacks} ";
             fi
-            cat <<EOF >> "${_auxFile}"
+            _stacks="${_stacks}${_categoryStacks}";
+          else
+            _noError=${FALSE};
+            if isFalse ${_continueWithNextStack}; then
+              exitWithErrorCode NO_STACKS_IN_CATEGORY_FOUND "${_category}";
+            fi
+          fi
+
+          if isTrue ${_noError}; then
+            IFS="${DWIFS}";
+            for _stack in ${_stacks}; do
+              IFS="${_oldIFS}";
+              if isStackEnabled "${_category}/${_stack}" "${ENVIRONMENT}" "${CLIENT}"; then
+                if retrieveIndexes "${_category}/${_stack}"; then
+                  local _stackIndex="";
+                  _stackIndexes="${RESULT}";
+                  local _index;
+                  IFS="${DWIFS}";
+                  for _index in ${_stackIndexes}; do
+                    IFS="${_oldIFS}";
+                    if isNotEmpty "${_index}"; then
+                      if isNotEmpty "${_stackIndex}"; then
+                        _stackIndex="${_stackIndex}-";
+                      fi
+                      _stackIndex="${_stackIndex}${_index}";
+                    fi
+                  done
+                  IFS="${_oldIFS}";
+                fi
+                cat <<EOF >> "${_auxFile}"
 ${_stackIndex}=${_category}/${_stack}
 EOF
+              fi
+            done
+            IFS="${_oldIFS}";
           fi
-        done
-        IFS="${_oldIFS}";
+        fi
       done
 
       _result="$(sort "${_auxFile}" | awk -F'=' '{print $2;}')";
@@ -2230,7 +2381,10 @@ EOF
       local _stackOrderFile="${RESULT}";
       sort "${_auxFile}" | awk -F'=' '{print $2;}' > "${_stackOrderFile}";
     else
-      exitWithErrorCode NO_CATEGORIES_FOUND;
+      _noError=${FALSE};
+      if isFalse ${_continueWithNextStack}; then
+        exitWithErrorCode NO_CATEGORIES_FOUND;
+      fi
     fi
   fi
 
@@ -2290,18 +2444,21 @@ function deployAll() {
     for _stack in ${_chain}; do
       IFS="${_oldIFS}";
 
+      retrieveStackRegionOrElse "${_stack}" "${ENVIRONMENT}" "${REGION}" "${CLIENT}";
+      local _region="${RESULT}";
+
       if areEqual "${_action}" create; then
-        if isStackCreated "${_stack}" "${ENVIRONMENT}" "${PROFILE}" "${REGION}" "${CLIENT}"; then
+        if isStackCreated "${_stack}" "${ENVIRONMENT}" "${PROFILE}" "${_region}" "${CLIENT}"; then
           logInfo -n "${_stack}";
           logInfoResult NEUTRAL "created";
         else
           cacheStackAsFailed "${_stack}";
-          if createOrUpdateStack "${_stack}" "${_action}" "${ENVIRONMENT}" "${PROFILE}" "${REGION}" ${FALSE} "${CLIENT}"; then
+          if createOrUpdateStack "${_stack}" "${_action}" "${ENVIRONMENT}" "${PROFILE}" "${_region}" ${FALSE} "${CLIENT}"; then
             cacheStackAsSuccessfullyDeployed "${_stack}";
           fi
         fi
       else
-        if createOrUpdateStack "${_stack}" "${_action}" "${ENVIRONMENT}" "${PROFILE}" "${REGION}" ${FALSE} "${CLIENT}"; then
+        if createOrUpdateStack "${_stack}" "${_action}" "${ENVIRONMENT}" "${PROFILE}" "${_region}" ${FALSE} "${CLIENT}"; then
           cacheStackAsSuccessfullyDeployed "${_stack}";
         fi
       fi
