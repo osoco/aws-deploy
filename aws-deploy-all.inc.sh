@@ -47,3 +47,16 @@ defineEnvVar OMIT_CLIENT_IN_STACK_NAME MANDATORY "Whether to omit the client in 
 # env: OMIT_CONTESTIA_IN_STACK_NAME: Whether to omit the contestia word in the stack name.
 defineEnvVar OMIT_CONTESTIA_IN_STACK_NAME MANDATORY "Whether to omit the contestia word in the stack name" ${FALSE};
 # vim: syntax=sh ts=2 sw=2 sts=4 sr noet
+# env: DEV_NEXPLORE_AWS_PROFILE: The AWS profile for nexplore / dev.
+defineEnvVar DEV_NEXPLORE_AWS_PROFILE MANDATORY "The AWS profile for nexplore / dev" "nexplore-contestia-dev";
+# env: DEV_NEXPLORE_AWS_REGION: The AWS region for nexplore / dev.
+defineEnvVar DEV_NEXPLORE_AWS_REGION MANDATORY  "The AWS region for nexplore / dev" "eu-west-1";
+# env: KEY_NAME: The name of the SSH key.
+overrideEnvVar KEY_NAME "nexplore-contestia-dev";
+# env: OMIT_TENANT_IN_STACK_NAME: Whether to omit the tenant when creating stack names.
+overrideEnvVar OMIT_CLIENT_IN_STACK_NAME ${TRUE};
+# env: OMIT_CONTESTIA_IN_STACK_NAME: Whether to omit the "contestia" part in stack names.
+overrideEnvVar OMIT_CONTESTIA_IN_STACK_NAME ${FALSE};
+# env: OMIT_STACKS: A comma-separated list of stacks to omit.
+overrideEnvVar OMIT_STACKS "backoffice-evaapp-cluster,cluster,core-cluster,s3uploader-cluster,backoffice-cluster,evaapp-cluster";
+# vim: syntax=sh ts=2 sw=2 sts=4 sr noet
