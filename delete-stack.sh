@@ -1,4 +1,4 @@
-#!/bin/env dry-wit
+#!/usr/bin/env dry-wit
 # Copyright 2017-today Osoco S.L.
 # Distributed under the terms of the GNU General Public License v3
 # mod: deploy-stack
